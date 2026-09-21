@@ -204,6 +204,33 @@ const browser = await chromium.launch();
   const dash = await shot(page, 'dashboard · ward', '37-dashboard-ward');
   check('dashboard: shows the keypad', /Published figures|Beds|ICU/i.test(dash.text));
 
+  // The dispatch console must disclose how its ranking was computed. Proximity
+  // is scored on road drive time, resolved before anything is ranked, so the
+  // shortlist and the map cannot disagree -- and when the router is unavailable
+  // the engine falls back to straight-line geometry and says so. A dispatcher
+  // acting on a nine-minute ETA is entitled to know which of those they have.
+  await page.goto(`${BASE}/console`, { waitUntil: 'networkidle' });
+  await page.waitForTimeout(2200);
+  const queue = await page.innerText('body');
+  const ref = (queue.match(/TN-\d{4}-[A-Z0-9]{3}/) || [])[0];
+  if (ref) {
+    await page.getByText(ref, { exact: true }).first().click();
+    await page.waitForTimeout(3200);
+    const incident = await page.innerText('body');
+    check(
+      'console: discloses how the ranking was computed',
+      /Ranked on road drive time|Ranked on straight-line estimates/.test(incident),
+      (incident.split('\n').find((l) => /Ranked on/.test(l)) || '').slice(0, 90),
+    );
+    check(
+      'console: each candidate says whether its ETA is road-derived',
+      /via road|direct/.test(incident),
+    );
+    await shot(page, 'console · routing disclosure', '42-console-routing-disclosure');
+  } else {
+    check('console: has an incident to open', false, 'no incident reference in the queue');
+  }
+
   await ctx.close();
 }
 
