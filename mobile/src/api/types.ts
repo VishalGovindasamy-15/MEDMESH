@@ -1,0 +1,624 @@
+/**
+ * Domain types.
+ *
+ * Narrowed by hand rather than generated from OpenAPI, and that is a deliberate
+ * call: generated types make every optional server field optional in the UI,
+ * which pushes defensive `?? 0` noise into every screen. These are the shapes
+ * the app actually relies on, checked once at the boundary.
+ */
+
+export type Role =
+  | 'citizen'
+  | 'dispatcher'
+  | 'driver'
+  | 'hospital_admin'
+  | 'gov_official'
+  | 'platform_admin';
+
+export type FreshnessState = 'live' | 'warm' | 'stale' | 'cold' | 'unknown';
+export type TrustBand = 'high' | 'medium' | 'low';
+export type Congestion = 'low' | 'moderate' | 'high' | 'critical';
+
+export interface SessionUser {
+  id: number;
+  email: string;
+  full_name: string;
+  phone: string | null;
+  role: Role;
+  hospital_id: number | null;
+  hospital_name: string | null;
+  district_id: number | null;
+  district_name: string | null;
+  scope: string | null;
+  last_login_at: string | null;
+}
+
+export interface TrustFactor {
+  label: string;
+  detail: string;
+  delta: string;
+}
+
+export interface TrustVerdict {
+  score: number;
+  band: TrustBand;
+  factors: TrustFactor[];
+  quarantined: boolean;
+  flags: string[];
+}
+
+export interface Capacity {
+  hospital_id: number;
+  beds_available: number;
+  total_beds: number;
+  icu_available: number;
+  total_icu: number;
+  ventilators_available: number;
+  total_ventilators: number;
+  ed_congestion: Congestion;
+  ed_waiting: number;
+  blood_units: number;
+  antivenom_vials: number;
+  source: string;
+  recorded_at: string;
+  trust_state: string;
+  anomaly_flags: string[];
+  quarantined: boolean;
+  holds_active: number;
+  version: number;
+  beds_effective: number;
+  icu_effective: number;
+  vent_effective: number;
+}
+
+export interface Facility {
+  id: number;
+  slug: string;
+  name: string;
+  short_name: string;
+  type: 'public' | 'private' | 'trust';
+  type_label: string;
+  district_id: number;
+  district_name?: string;
+  address: string;
+  lat: number;
+  lng: number;
+  phone: string;
+  emergency_phone: string | null;
+  verification: 'unverified' | 'pending' | 'verified' | 'suspended';
+  integration: 'api' | 'manual';
+  source_system: string | null;
+  expose_doctor_directory: boolean;
+  specialties: string[];
+  capabilities: {
+    blood_bank: boolean;
+    trauma_centre: boolean;
+    cath_lab: boolean;
+    burn_unit: boolean;
+    dialysis: boolean;
+    neonatal_icu: boolean;
+  };
+  declared: { beds: number; icu: number; ventilators: number };
+  capacity: Capacity | null;
+  trust: TrustVerdict | null;
+  holds?: Record<string, number>;
+}
+
+export interface FacilityDetail extends Facility {
+  history: {
+    t: string;
+    beds: number;
+    icu: number;
+    vent: number;
+    ed_waiting: number;
+    congestion: Congestion;
+    source: string;
+    quarantined: boolean;
+  }[];
+  doctors_on_duty: {
+    id: number;
+    full_name: string;
+    specialty: string;
+    designation: string;
+    department: string;
+    shift: string;
+    accepts_emergency: boolean;
+    duty_end: string | null;
+  }[];
+  active_holds: {
+    id: number;
+    resource: string;
+    expires_at: string;
+    seconds_remaining: number;
+    incident_id: number | null;
+    /** Case reference, urgency, crew and live ETA — what the ward acts on. */
+    reference: string | null;
+    urgency: string | null;
+    category: string | null;
+    status: string | null;
+    ambulance_call_sign: string | null;
+    eta_minutes: number | null;
+    distance_km: number | null;
+  }[];
+}
+
+export interface Doctor {
+  id: number;
+  full_name: string;
+  registration_no: string;
+  specialty: string;
+  specialty_label: string;
+  department: string;
+  designation: string;
+  on_duty: boolean;
+  duty_state: string;
+  shift: string;
+  shift_window: string;
+  duty_end: string | null;
+  minutes_remaining: number | null;
+  accepts_emergency: boolean;
+  languages: string[];
+  hospital: {
+    id: number;
+    name: string;
+    short_name: string;
+    type: string;
+    address: string;
+    lat: number;
+    lng: number;
+    phone: string;
+  } | null;
+  district: { id: number; name: string } | null;
+}
+
+export interface ShortlistCandidate {
+  hospital_id: number;
+  name: string;
+  short_name: string;
+  type: string;
+  district_id: number;
+  address: string;
+  lat: number;
+  lng: number;
+  phone: string;
+  eligible: boolean;
+  score: number;
+  breakdown: Record<string, number>;
+  reasons: string[];
+  warnings: string[];
+  blockers: string[];
+  distance_km: number;
+  eta_minutes: number;
+  distance_label: string;
+  /**
+   * Where the distance and ETA came from. A dispatcher comparing two facilities
+   * is entitled to know whether both numbers came off the road network or one
+   * of them is straight-line geometry inflated by a winding factor -- the two
+   * disagree most in hilly or river-cut terrain, which is exactly where the
+   * choice is hardest.
+   */
+  distance_is_road: boolean;
+  distance_provider: string;
+  traffic_aware: boolean;
+  straight_km: number;
+  capacity: Capacity | null;
+  freshness: { state: FreshnessState; label: string; age_seconds: number } | null;
+  trust: TrustVerdict | null;
+}
+
+/**
+ * How a shortlist's distances were resolved. Present on every ranked response
+ * so the console can disclose it rather than leaving a dispatcher to assume.
+ */
+export interface RoutingSummary {
+  total: number;
+  routed: number;
+  estimated: number;
+  traffic_aware: number;
+  road_derived: boolean;
+  fully_routed: boolean;
+  provider: string;
+  prefilter_km: number;
+  catchment_minutes: number;
+}
+
+export interface Incident {
+  id: number;
+  reference: string;
+  category: string;
+  category_label: string;
+  urgency: 'P1' | 'P2' | 'P3';
+  lat: number;
+  lng: number;
+  landmark: string;
+  district_id: number;
+  district_name: string | null;
+  /** Structured scene assessment. No free-text clinical field exists. */
+  scene: {
+    patient_state: string;
+    patient_state_label: string;
+    mechanism: string;
+    mechanism_label: string;
+    bleeding: string;
+    hazard: string;
+    hazard_label: string;
+    observations: string[];
+    casualty_count: number;
+    trapped: boolean;
+    bystander_cpr: boolean;
+  };
+  requires: { icu: boolean; ventilator: boolean; blood: boolean; specialty: string | null };
+  status: string;
+  created_at: string;
+  dispatched_at: string | null;
+  arrived_at: string | null;
+  elapsed_seconds: number;
+  assigned_hospital: {
+    id: number;
+    name: string;
+    short_name: string;
+    phone: string;
+    lat: number;
+    lng: number;
+    address: string;
+  } | null;
+  assigned_ambulance: {
+    id: number;
+    call_sign: string;
+    operator: string;
+    capability: string;
+    capability_label: string;
+    status: string;
+    lat: number;
+    lng: number;
+  } | null;
+  active_holds: { id: number; resource: string; expires_at: string; seconds_remaining: number }[];
+  shortlist?: ShortlistCandidate[];
+  match_snapshot?: { top: ShortlistCandidate[]; excluded: ShortlistCandidate[] };
+}
+
+export interface Ambulance {
+  id: number;
+  call_sign: string;
+  registration: string;
+  operator_type: string;
+  operator_name: string;
+  capability: string;
+  capability_label: string;
+  status: string;
+  lat: number;
+  lng: number;
+}
+
+export interface CrewAssignment {
+  ambulance: Ambulance | null;
+  assignment: (Incident & { scene_eta_minutes: number | null; scene_distance_km: number | null }) | null;
+  destination: {
+    id: number;
+    name: string;
+    short_name: string;
+    address: string;
+    phone: string;
+    lat: number;
+    lng: number;
+    distance_km: number;
+    eta_minutes: number;
+    distance_label: string;
+    bearing_deg: number;
+    bearing_label: string;
+    traffic_note: string;
+    capabilities: Record<string, boolean>;
+  } | null;
+  destination_capacity: Capacity | null;
+  route: {
+    origin: { lat: number; lng: number };
+    points: [number, number][];
+    provider: string;
+    generated_at: string;
+  } | null;
+  alternatives: ShortlistCandidate[];
+  message?: string;
+}
+
+export interface District {
+  id: number;
+  code: string;
+  name: string;
+  name_ta?: string | null;
+  state: string;
+  lat: number;
+  lng: number;
+  population: number;
+  hospital_count?: number;
+}
+
+export interface DistrictRollup {
+  district_id: number;
+  district_name: string;
+  population: number;
+  hospitals: number;
+  beds: { total: number; available: number; occupied: number; occupancy_pct: number | null };
+  icu: { total: number; available: number; occupied: number; occupancy_pct: number | null };
+  ventilators: { total: number; available: number; occupied: number; occupancy_pct: number | null };
+  ed_congestion_index: number | null;
+  reporting_facilities: number;
+  stale_facilities: number;
+}
+
+export interface AnalyticsOverview {
+  generated_at: string;
+  state: {
+    facilities: number;
+    facilities_reporting: number;
+    beds_total: number;
+    beds_available: number;
+    beds_occupancy_pct: number | null;
+    icu_total: number;
+    icu_available: number;
+    icu_occupancy_pct: number | null;
+  };
+  operations: {
+    incidents_last_24h: number;
+    incidents_open: number;
+    ambulances: number;
+    ambulances_available: number;
+    holds_active: number;
+    open_feedback: number;
+  };
+  surge: {
+    id: number;
+    title: string;
+    district_id: number;
+    scope: string;
+    opened_at: string;
+    elapsed_minutes: number;
+  } | null;
+  districts: DistrictRollup[];
+}
+
+export interface DistrictDetail extends DistrictRollup {
+  trend: {
+    t: string;
+    beds_available: number;
+    icu_available: number;
+    vent_available: number;
+    ed_waiting: number;
+    ed_congestion_index: number;
+  }[];
+  facilities: {
+    id: number;
+    name: string;
+    short_name: string;
+    type: string;
+    verification: string;
+    integration: string;
+    total_beds: number;
+    total_icu: number;
+    beds_available: number | null;
+    icu_available: number | null;
+    vent_available: number | null;
+    occupancy_pct: number | null;
+    ed_congestion: Congestion | null;
+    ed_waiting: number | null;
+    holds: number;
+    last_report_age_seconds: number | null;
+  }[];
+  open_incidents: {
+    id: number;
+    reference: string;
+    category: string;
+    urgency: string;
+    status: string;
+    landmark: string;
+    created_at: string;
+    age_minutes: number;
+    hospital_id: number | null;
+  }[];
+  access: { role: string; drilldown_enabled: boolean };
+}
+
+export interface PlatformHealth {
+  status: string;
+  checked_at: string;
+  facilities: { total: number; verified: number; projected: number };
+  feed: { live: number; stale: number; coverage_pct: number };
+  realtime: { clients: number };
+  last_write_at: string | null;
+  components: { name: string; state: string }[];
+}
+
+export interface FeedbackItem {
+  id: number;
+  hospital_id: number;
+  hospital_name: string;
+  kind: string;
+  kind_label: string;
+  comment: string;
+  reporter_role: string;
+  status: string;
+  incident_id: number | null;
+  created_at: string;
+  age: string;
+}
+
+/* -- integration, inbox, provisioning -------------------------------------
+ * Shapes for the surfaces that connect MedMesh to the systems hospitals
+ * already run, and for the people who operate it.
+ */
+
+export type ConnectorKind = 'fhir_r4' | 'vendor_rest' | 'csv_sftp' | 'manual';
+export type ConnectorHealth = 'healthy' | 'quiet' | 'failing' | 'never_seen' | 'disabled';
+
+export interface Connector {
+  id: number;
+  hospital_id: number;
+  hospital_name: string | null;
+  hospital_short_name: string | null;
+  kind: ConnectorKind;
+  source_system: string | null;
+  active: boolean;
+  key_prefix: string | null;
+  has_key: boolean;
+  last_seen_at: string | null;
+  last_seen_age_seconds: number | null;
+  last_status_code: number | null;
+  last_error: string | null;
+  accepted_24h: number;
+  rejected_24h: number;
+  health: ConnectorHealth;
+  created_at: string;
+  rotated_at: string | null;
+}
+
+export interface ConnectorEstate {
+  facilities: number;
+  connectors: number;
+  by_health: Record<string, number>;
+  by_kind: Record<string, number>;
+  by_integration: Record<string, number>;
+  manual_facilities: number;
+  api_without_connector: string[];
+  ingest_url_fhir: string;
+  ingest_url_vendor: string;
+}
+
+export interface ConnectorTemplate {
+  kind: ConnectorKind;
+  label: string;
+  ingest_url: string | null;
+  auth: string;
+  description: string;
+  fields?: string[];
+  population_codes?: string[];
+  sample: Record<string, unknown>;
+}
+
+export interface IssuedConnectorKey {
+  connector_id: number;
+  hospital_id: number;
+  kind: ConnectorKind;
+  key: string;
+  key_shown_once: boolean;
+  ingest_url: string | null;
+  sample_payload: Record<string, unknown>;
+  warning: string;
+}
+
+export interface ConnectorTestResult {
+  ok: boolean;
+  kind: string;
+  message: string;
+  parsed?: {
+    beds_available: number;
+    icu_available: number;
+    ventilators_available: number;
+    ed_congestion: string;
+    ed_waiting: number;
+    blood_units: number;
+  };
+  sample_payload?: Record<string, unknown>;
+  ingest_url?: string;
+}
+
+export type NotificationKind =
+  | 'inbound_patient'
+  | 'hold_placed'
+  | 'hold_expiring'
+  | 'hold_released'
+  | 'staleness_reminder'
+  | 'submission_quarantined'
+  | 'feedback_raised'
+  | 'verification_decided'
+  | 'surge_opened'
+  | 'surge_closed'
+  | 'connector_failing';
+
+export interface NotificationItem {
+  id: number;
+  kind: NotificationKind;
+  kind_label: string;
+  title: string;
+  body: string;
+  severity: 'info' | 'warning' | 'critical';
+  hospital_id: number | null;
+  hospital_name: string | null;
+  incident_id: number | null;
+  incident_reference: string | null;
+  payload: Record<string, unknown> | null;
+  created_at: string;
+  age_seconds: number;
+  read_at: string | null;
+  acknowledged_by: number | null;
+}
+
+export interface InboxPage {
+  count: number;
+  unread: number;
+  results: NotificationItem[];
+}
+
+export interface AdminUser {
+  id: number;
+  email: string;
+  full_name: string;
+  role: Role;
+  is_active: boolean;
+  hospital: string | null;
+  district: string | null;
+  last_login_at: string | null;
+  created_at: string;
+}
+
+export interface OnboardingApplication {
+  hospital_id: number;
+  name: string;
+  short_name: string;
+  type: string;
+  district: string | null;
+  district_id: number | null;
+  address: string;
+  beds: number;
+  icu: number;
+  ventilators: number;
+  verification: string;
+  integration: string;
+  specialties: string[];
+  connector_kind: ConnectorKind | null;
+  applied_at: string | null;
+}
+
+export interface OnboardingReceipt {
+  hospital_id: number;
+  reference: string;
+  verification: string;
+  message: string;
+  next_steps: string[];
+}
+
+/* -- governance: audit, complaints, platform health ------------------------ */
+
+export interface AuditEntry {
+  id: number;
+  at: string;
+  actor: string;
+  role: string;
+  action: string;
+  entity: string;
+  summary: string;
+  payload: Record<string, unknown> | null;
+  ip: string | null;
+}
+
+export interface Complaint {
+  id: number;
+  hospital_id: number;
+  hospital_name: string;
+  kind: string;
+  kind_label: string;
+  comment: string;
+  reporter_role: string;
+  status: string;
+  incident_id: number | null;
+  created_at: string;
+  age: string;
+}
