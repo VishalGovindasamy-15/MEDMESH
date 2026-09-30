@@ -8,7 +8,7 @@
 | Frontend | React Native 0.86 / Expo SDK 57 · expo-router · one codebase, web + iOS + Android |
 | Coverage | 38 districts · 152 facilities · 1,069 clinicians · 66 ambulances |
 | Code | 10,958 backend Python · 13,505 frontend TS/TSX · 1,514 lines of tests · 753 lines of browser harness |
-| Verified | 35 API tests · 31 route × viewport sweeps · role/notification/admin surface suite · Google Maps suite · clean typecheck |
+| Verified | 70 API tests · 64 route × viewport sweeps · role/notification/admin surface suite · Google Maps suite · clean typecheck |
 | Repository | local git, one commit, 182 files — push URL pending from you |
 
 ---
@@ -231,14 +231,60 @@ patient-safety risk, and that decision is documented in `src/lib/i18n.ts`.
 
 ---
 
-## 4. Verification
+## 4. The end-to-end audit
+
+A forty-two item review of every route, role and screen was worked in order after
+the statewide build. Most items were small. These are the ones that changed
+behaviour.
+
+**A ward could not answer.** An inbound prep alert had no reply, so a facility
+that could not take the patient had no way to say so and its bed stayed on the
+next incident's shortlist. Facilities now accept or decline with a structured
+reason: a decline releases the holds immediately, corrects the counters where
+the reason implies it, records the facility so the shortlist does not re-offer
+it, and leaves the incident running — a closed door is not a cancelled call. A
+dispatcher can record the same answer taken down by telephone, and the audit
+trail distinguishes the two, because after an incident somebody asks. Re-routing
+back onto a facility that has refused is refused in turn unless the dispatcher
+states a reason, and that reason is the audit entry.
+
+**The driver's phone never reported its position.** `POST /crew/location` had
+existed from the first week and no client called it: the only thing that moved a
+vehicle on the console's map was the position attached to a status press. Four
+or five fixes across a whole trip, none during the longest leg, and a console
+watching a unit sit motionless on the way to a P1 — a picture that is not stale
+so much as confidently wrong. The crew screen now reports while a trip is live
+and shows the age of the last fix; the route strip states plainly that it is an
+overview rather than turn-by-turn and that navigation runs in Google Maps; the
+cached-capacity warning prints the age at the size of the counters it qualifies;
+and the endpoint bounds a fix to the state instead of accepting `lat: 95`.
+
+**The operations picture was public.** `/analytics/overview` — open incidents,
+live fleet strength, active bed holds, surge state — accepted an optional
+credential, so anyone could read how many ambulances were free across Tamil Nadu.
+It is now authenticated and role-scoped, the SLA report is operations-only, and
+both CSVs carry the officer's jurisdiction; the district export button downloads
+the file with the token attached instead of opening a tab containing the API's
+401 body. It was also broken: the incident CSV had been raising `NameError` since
+the split-interval columns landed, which nothing had ever pressed.
+
+Also from the same pass: one incident-visibility rule replacing per-endpoint
+guesses about who may read a case; flat `assigned_hospital_id` /
+`assigned_ambulance_id` on the incident payload, so a client can ask "is this
+mine" without null-checking a nested object; structured decline reasons and a
+422 when none is given; and the console rendering holds and destination for all
+eight stages of a trip rather than the first three.
+
+---
+
+## 5. Verification
 
 ```bash
-cd backend  && python3 -m pytest tests -q      # 35 passed
+cd backend  && python3 -m pytest tests -q      # 70 passed
 cd mobile   && npx tsc --noEmit                # clean
-cd tools/qa && node sweep.mjs                  # 31 route × viewport
-cd tools/qa && node surfaces.mjs               # role-scoped surfaces
-cd tools/qa && node maps.mjs                   # Google Maps integration
+cd tools/qa && node sweep.mjs                  # 32 route × viewport, 0 problems
+cd tools/qa && node surfaces.mjs               # all surfaces verified
+cd tools/qa && node maps.mjs                   # Google Maps integration verified
 ```
 
 The API suite covers the paths that matter operationally, not line coverage:
@@ -258,16 +304,24 @@ The browser harnesses drive the real sign-in form as each pilot role in a
 separate context, and assert on what a person would see: every surface fits its
 viewport without horizontal scroll, the bottom bar stays pinned on a phone, enum
 names never reach the screen, the Tamil interface is genuinely translated, the
-map labels its facilities, and no uncaught console error occurs anywhere in the
-run.
+map labels its facilities, each shortlist candidate says whether its ETA came off
+the road network, both CSV exports produce an actual file, and no uncaught
+console error occurs anywhere in the run.
+
+Four of the audit's findings were caught by these harnesses rather than by
+reading, and two of the harness failures were bugs in the harness — a ward
+session asserting on another facility's screen, and a crew fixture that assumed a
+unit was free. Both are fixed where they belonged, which is the point of having
+them: the suite is allowed to be wrong about the product, and is not allowed to
+stay wrong.
 
 ---
 
-## 5. Continuous integration
+## 6. Continuous integration
 
 `.github/workflows/ci.yml` runs three jobs on push and pull request:
 
-1. **Backend** — the 35-test suite. Seeds its own database at a temp path and
+1. **Backend** — the 70-test suite. Seeds its own database at a temp path and
    disables the simulator, so it needs no services and is order-independent.
 2. **Frontend** — typecheck, then a web export **without a Maps key**, then an
    assertion that no `AIzaSy…` string appears anywhere in the public bundle.
@@ -285,7 +339,7 @@ caught any of them.
 
 ---
 
-## 6. Android build
+## 7. Android build
 
 `ANDROID_BUILD.md` covers EAS Build and the local Gradle path. Verified by
 running: `expo prebuild` generates `android/` with package `in.medmesh.app`; the
@@ -301,16 +355,24 @@ otherwise. EAS Build is the recommended route and produces a signed artefact.
 
 ---
 
-## 7. Known limitations
+## 8. Known limitations
 
 Recorded rather than discovered later.
 
 **Not implemented**
 
 - **Offline / SMS / IVR fallback** — the report's §7 item. The crew screen caches
-  its last assignment and shows a stale banner, but there is no SMS or IVR
-  channel for facilities and callers without data. This is the only genuinely
-  unimplemented §7 item.
+  its last assignment and prints the age of the cached counters at the size of
+  the counters, because that number is what a crew plans around; but there is no
+  SMS or IVR channel for facilities and callers without data. This is the only
+  genuinely unimplemented §7 item.
+- **Background location is deliberately not used.** The crew app reports its
+  position only while the trip screen is open. Continuous background GPS costs
+  battery, needs the "always" permission tier, and would need to survive a
+  handset the driver has pocketed — which is a worse trade in a pilot than the
+  coverage it buys. The consequence is honest and stated in the code: a fix is
+  reported while somebody is looking at the screen, and the age of the last one
+  is on that screen.
 - **Real PostgreSQL and Redis** — deferred by your instruction. SQLite/WAL now;
   `MEDMESH_DATABASE_URL` switches it, and the window-function query in
   `repository.py` carries its `DISTINCT ON` variant in a comment. `LiveStore` is
@@ -334,7 +396,7 @@ Recorded rather than discovered later.
 
 ---
 
-## 8. Repository
+## 9. Repository
 
 Initialised locally with one commit, 182 files, `.gitignore` covering build
 artefacts, databases, native projects and credentials. A sanity check confirms no
@@ -351,7 +413,7 @@ git branch -M main
 git push -u origin main
 ```
 
-## 9. Running it
+## 10. Running it
 
 ```bash
 cd backend && bash setup.sh && python3 -m uvicorn app.main:app --port 8000
