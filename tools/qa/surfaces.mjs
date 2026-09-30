@@ -23,6 +23,7 @@ const ACCOUNTS = {
   admin: ['admin@medmesh.in', 'MedMesh@2026'],
   hospital: ['admin@srmc.medmesh.in', 'Hospital@2026'],
   dispatcher: ['dispatch@medmesh.in', 'Dispatch@108'],
+  gov: ['gov@medmesh.in', 'District@2026'],
 };
 
 const problems = [];
@@ -204,19 +205,36 @@ const browser = await chromium.launch();
   const dash = await shot(page, 'dashboard · ward', '37-dashboard-ward');
   check('dashboard: shows the keypad', /Published figures|Beds|ICU/i.test(dash.text));
 
+  await ctx.close();
+}
+
+/* ---------------------------------------------------------- dispatcher console */
+{
+  const { ctx, page } = await session(browser, ...ACCOUNTS.dispatcher);
+  watch(page);
+
   // The dispatch console must disclose how its ranking was computed. Proximity
   // is scored on road drive time, resolved before anything is ranked, so the
   // shortlist and the map cannot disagree -- and when the router is unavailable
   // the engine falls back to straight-line geometry and says so. A dispatcher
   // acting on a nine-minute ETA is entitled to know which of those they have.
+  //
+  // This runs as the dispatcher, not as the ward: an incident is scoped to the
+  // roles that have a stake in it, and a ward reading somebody else's case is
+  // exactly the leak the access rules exist to prevent.
   await page.goto(`${BASE}/console`, { waitUntil: 'networkidle' });
-  await page.waitForTimeout(2200);
+  await page.waitForTimeout(2500);
   const queue = await page.innerText('body');
   const ref = (queue.match(/TN-\d{4}-[A-Z0-9]{3}/) || [])[0];
   if (ref) {
     await page.getByText(ref, { exact: true }).first().click();
-    await page.waitForTimeout(3200);
+    await page.waitForTimeout(4000);
     const incident = await page.innerText('body');
+    check(
+      'console: opens an incident from the queue',
+      /Advance status|Committed destination|Shortlist|Match/i.test(incident),
+      incident.split('\n').slice(0, 1)[0],
+    );
     check(
       'console: discloses how the ranking was computed',
       /Ranked on road drive time|Ranked on straight-line estimates/.test(incident),
@@ -230,6 +248,44 @@ const browser = await chromium.launch();
   } else {
     check('console: has an incident to open', false, 'no incident reference in the queue');
   }
+
+  await ctx.close();
+}
+
+/* --------------------------------------------------------- analytics export */
+{
+  const { ctx, page } = await session(browser, ...ACCOUNTS.gov);
+  watch(page);
+
+  // The export button is the one control on this surface that leaves the app,
+  // and it was the one that did not work: it opened a bare URL in a new tab,
+  // which carries no Authorization header, so every officer who pressed it got
+  // a tab containing the API's 401 body. Nothing in the harness ever pressed
+  // it, which is why it survived. Press it now, and require a file.
+  await page.goto(`${BASE}/analytics`, { waitUntil: 'networkidle' });
+  await page.waitForTimeout(2500);
+  const overview = await shot(page, 'analytics · state', '43-analytics-state');
+  check('analytics: renders district rows', /occupancy|districts/i.test(overview.text));
+
+  const download = page.waitForEvent('download', { timeout: 15000 }).catch(() => null);
+  await page.getByText('Export CSV', { exact: true }).first().click();
+  const file = await download;
+  check(
+    'analytics: the capacity export downloads a file',
+    !!file && /\.csv$/i.test(file.suggestedFilename()),
+    file ? file.suggestedFilename() : 'no download was offered',
+  );
+
+  await page.goto(`${BASE}/analytics/1`, { waitUntil: 'networkidle' });
+  await page.waitForTimeout(2500);
+  const districtDownload = page.waitForEvent('download', { timeout: 15000 }).catch(() => null);
+  await page.getByText('Export', { exact: true }).first().click();
+  const districtFile = await districtDownload;
+  check(
+    'analytics · district: the export downloads a file',
+    !!districtFile && /\.csv$/i.test(districtFile.suggestedFilename()),
+    districtFile ? districtFile.suggestedFilename() : 'no download was offered',
+  );
 
   await ctx.close();
 }

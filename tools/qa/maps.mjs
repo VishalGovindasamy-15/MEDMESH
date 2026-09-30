@@ -79,12 +79,26 @@ async function createLiveTrip() {
   if (!login.access_token) return null;
   const auth = { Authorization: `Bearer ${login.access_token}`, 'Content-Type': 'application/json' };
 
-  // The demo driver account owns the first seeded unit; ambulance status is a
-  // consequence of incident status rather than a field anyone sets, so the unit
-  // is simply picked from the fleet list.
-  const fleet = await fetch(`${BASE}/api/v1/ambulances`, { headers: auth }).then((r) => r.json());
-  const unit = (fleet.results ?? []).find((a) => a.id === 1) ?? (fleet.results ?? [])[0];
+  // The demo driver account owns one unit, and that is the unit the crew screen
+  // will show -- so the fixture has to use it, not just any free ambulance.
+  // Status is a consequence of incident status rather than a field anyone sets,
+  // which means a unit left mid-journey by the simulator cannot simply be picked
+  // up: the trip it is already on has to be finished first. That is exactly what
+  // a ward does at handover, so the fixture drives the real endpoint.
+  const roster = await fetch(`${BASE}/api/v1/ambulances/drivers`, { headers: auth }).then((r) => r.json());
+  const unit = (roster.results ?? [])[0]?.linked_ambulance ?? null;
   if (!unit) return null;
+
+  if (unit.status !== 'available') {
+    const open = await fetch(`${BASE}/api/v1/incidents?limit=200`, { headers: auth }).then((r) => r.json());
+    const busy = (open.results ?? []).find((i) => i.assigned_ambulance_id === unit.id && i.is_open);
+    if (!busy) return null;
+    await fetch(`${BASE}/api/v1/incidents/${busy.id}/status`, {
+      method: 'POST',
+      headers: auth,
+      body: JSON.stringify({ status: 'handed_over' }),
+    });
+  }
 
   const incident = await fetch(`${BASE}/api/v1/incidents`, {
     method: 'POST',
@@ -202,7 +216,33 @@ const browser = await chromium.launch();
   );
   check('crew: route drawn in the accent hue', !!crewLog && /^#/.test(crewLog.polylines[0]?.stroke ?? ''));
   check('crew: Google directions summary surfaced', /NH948/.test(crewText), 'expected the road name from the API');
-  check('crew: navigation handoff offered', /Navigate/.test(crewText));
+  // The handoff is the point of the screen for a driver, so it is asserted as a
+  // URL rather than as a word. `Linking.openURL` on web lands on `window.open`,
+  // which is stubbed here so the check is about where the button would send the
+  // crew -- and the request itself is blocked, because navigating this browser
+  // to Google halfway through the run would end the run.
+  await ctx.route('**google.com/maps/**', (route) => route.abort());
+  const navUrl = await page.evaluate(async () => {
+    let captured = null;
+    const original = window.open;
+    window.open = (url) => {
+      captured = String(url);
+      return null;
+    };
+    const trigger = [...document.querySelectorAll('[role="button"], button, a')].find((el) =>
+      /Open Google Maps|Navigate/i.test(el.textContent ?? ''),
+    );
+    if (!trigger) return '__no_control__';
+    trigger.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 400));
+    window.open = original;
+    return captured;
+  });
+  check(
+    'crew: navigation handoff offered',
+    typeof navUrl === 'string' && /google\.com\/maps/.test(navUrl) && /travelmode=driving/.test(navUrl),
+    navUrl === '__no_control__' ? 'no navigation control on the trip screen' : String(navUrl ?? '').slice(0, 120),
+  );
   await page.screenshot({ path: '/home/user/medmesh/docs/shots/32-maps-crew.png' });
 
   await ctx.close();

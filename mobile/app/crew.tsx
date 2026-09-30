@@ -52,14 +52,61 @@ import { useResponsive } from '../src/ui/useResponsive';
 
 const CACHE_KEY = 'medmesh.crew.assignment';
 
-// The driver's three progress reports. Ordered: index i can be claimed as soon
-// as the case has reached stage i-1, so a crew that forgets a tap can still
-// report the stage they are actually at.
-const STAGES = [
-  { key: 'en_route', label: 'En route to scene' },
-  { key: 'arrived', label: 'Patient on board' },
-  { key: 'handed_over', label: 'Confirm handover' },
+/**
+ * How often the vehicle reports its position during a live trip.
+ *
+ * Twenty seconds is the compromise: a unit at 60 km/h moves about 330 m in
+ * that window, which is close enough to continuous for a district map, and the
+ * GPS duty cycle stays low enough that a four-hour shift does not visibly
+ * drain the handset. Faster buys precision nobody uses; slower starts to look
+ * like a stall at a junction.
+ */
+const POSITION_INTERVAL_MS = 20_000;
+
+/**
+ * The crew's progress reports.
+ *
+ * This was three buttons, and the middle one was the bug the audit found: the
+ * label read "Patient on board" while the status it sent was `arrived`, which
+ * the backend defines as *the crew is at the scene, patient not yet loaded*.
+ * Pressing it therefore told the platform the patient was in the vehicle when
+ * the driver had only just parked — the ward's arrival countdown started
+ * against the wrong event, and the analytics recorded a load time that never
+ * happened.
+ *
+ * There are now five stages, one per thing that actually happens, and each sends
+ * the status whose name matches its label:
+ *
+ *   Arrived at scene    -> at_scene         the crew is there, patient is not
+ *   Patient loaded      -> patient_onboard  patient on the stretcher, still on scene
+ *   Departed scene      -> transporting     vehicle moving, patient aboard
+ *   Arrived at hospital -> at_hospital      at the receiving facility
+ *   Handover complete   -> handed_over      clinical responsibility transferred
+ *
+ * The labels and the statuses come from the server (`GET /crew/assignment`
+ * returns `next_actions`), so the app and the API cannot drift apart again. This
+ * list is the offline fallback for when that payload is coming from the cache.
+ */
+const STAGES: { key: string; label: string; hint: string }[] = [
+  { key: 'at_scene', label: 'Arrived at scene', hint: 'You are on scene. The patient is not in the vehicle yet.' },
+  { key: 'patient_onboard', label: 'Patient loaded', hint: 'Patient is on the stretcher and being treated.' },
+  { key: 'transporting', label: 'Departed scene', hint: 'The vehicle is moving with the patient aboard.' },
+  { key: 'at_hospital', label: 'Arrived at hospital', hint: 'You are at the receiving facility.' },
+  { key: 'handed_over', label: 'Handover complete', hint: 'The ward has taken responsibility. This releases the bed.' },
 ];
+
+/** Where the trip is, in the driver's words, for the header. */
+const CREW_STAGE_LABELS: Record<string, string> = {
+  dispatched: 'Dispatched — accept the job',
+  en_route: 'En route to scene',
+  at_scene: 'On scene',
+  patient_onboard: 'Patient loaded, on scene',
+  transporting: 'Transporting patient',
+  at_hospital: 'At hospital, handing over',
+  handed_over: 'Handed over',
+  closed: 'Closed',
+  cancelled: 'Stood down',
+};
 
 export default function CrewScreen() {
   const { t } = useTheme();
@@ -71,10 +118,16 @@ export default function CrewScreen() {
   const [data, setData] = useState<CrewAssignment | null>(null);
   const [cachedAt, setCachedAt] = useState<number | null>(null);
   const [offline, setOffline] = useState(false);
+  // Fifteen minutes is the point at which a ward's counters stop being a
+  // picture and start being a guess: two admissions and a discharge are normal
+  // in that window at a district hospital.
+  const cacheAgeMs = cachedAt ? Date.now() - cachedAt : null;
+  const stale = cacheAgeMs === null || cacheAgeMs > 15 * 60_000;
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [tick, setTick] = useState(0);
+  const [lastFixAt, setLastFixAt] = useState<number | null>(null);
 
   const load = useCallback(
     async (silent = false) => {
@@ -119,16 +172,109 @@ export default function CrewScreen() {
     return off;
   }, [subscribe, load]);
 
+  /**
+   * Report the vehicle's position while a trip is live.
+   *
+   * `POST /crew/location` existed from the first week and no client ever called
+   * it: the only thing that moved a vehicle on the dispatcher's map was the
+   * position attached to a status press, which is four or five fixes across a
+   * whole trip and none at all during the longest leg. A console watching a
+   * unit sit still for twenty minutes on the way to a P1 has been given a
+   * picture that is not merely stale but confidently wrong -- it looks like the
+   * crew has stopped.
+   *
+   * Foreground-only, and only while an assignment is live. Continuous
+   * background location would keep this working after the driver pockets the
+   * phone, and was rejected as disproportionate for a pilot: it costs battery,
+   * it needs the "always" permission tier, and a crew that distrusts the app
+   * will defeat it. What this does cover is the driver who is looking at the
+   * screen while they drive, which during a blue-light transfer is the whole
+   * journey.
+   *
+   * Failures are swallowed on purpose. A dropped fix is not something to tell a
+   * driver about mid-transport, and every other part of this screen already
+   * degrades to the cached assignment.
+   */
+  useEffect(() => {
+    if (!data?.assignment) return;
+    let cancelled = false;
+
+    const report = async () => {
+      try {
+        const Location = require('expo-location');
+        const permission = await Location.getForegroundPermissionsAsync();
+        if (!permission?.granted) return;
+        const position = await Location.getCurrentPositionAsync({
+          accuracy: Location.Accuracy.Balanced,
+        });
+        if (cancelled || !position?.coords) return;
+        await api.post(
+          '/crew/location',
+          { lat: position.coords.latitude, lng: position.coords.longitude },
+          { token },
+        );
+        if (!cancelled) setLastFixAt(Date.now());
+      } catch {
+        /* no fix, no permission, or the module is absent in this build */
+      }
+    };
+
+    void report();
+    const id = setInterval(report, POSITION_INTERVAL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [data?.assignment?.id, token]);
+
   useEffect(() => {
     const id = setInterval(() => setTick((v) => v + 1), 1000);
     return () => clearInterval(id);
   }, []);
 
+  /**
+   * Advance the trip.
+   *
+   * Two things happen here that did not before.
+   *
+   * The crew's position travels with the report. This app never called
+   * `POST /crew/location`, so the dispatcher's map showed every vehicle wherever
+   * it happened to be when the trip began — a console watching an ambulance sit
+   * motionless at the scene for forty minutes while it was actually on the road.
+   * Asking for continuous background location was rejected as too invasive for a
+   * pilot; attaching a fix to the five moments the driver already presses a
+   * button gives an operational picture at the moments that matter, with no
+   * permission prompt and no battery cost.
+   *
+   * The status is checked against the server's own `next_actions` before it is
+   * sent, so a stale cached payload cannot produce a transition the lifecycle
+   * will refuse. When it is refused anyway — a dispatcher re-routed the case in
+   * the meantime — the server's 409 explains what is legal from here, and that
+   * sentence is what the driver sees.
+   */
   const advance = async (status: string) => {
     if (!data?.assignment) return;
     setBusy(status);
+
+    let position: { lat: number; lng: number } | null = null;
     try {
-      await api.post(`/incidents/${data.assignment.id}/status`, { status }, { token });
+      const Location = require('expo-location');
+      const last = await Location.getLastKnownPositionAsync({ maxAge: 120_000 });
+      if (last?.coords) {
+        position = { lat: last.coords.latitude, lng: last.coords.longitude };
+      }
+    } catch {
+      // No permission, no fix, or the module is absent in this build. The report
+      // still goes; a status update without a position is useful, and a status
+      // update refused because the GPS had not warmed up is not.
+    }
+
+    try {
+      await api.post(
+        `/incidents/${data.assignment.id}/status`,
+        { status, lat: position?.lat ?? null, lng: position?.lng ?? null },
+        { token },
+      );
       await load(true);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not update the trip');
@@ -177,7 +323,10 @@ export default function CrewScreen() {
 
   const assignment = data.assignment;
   const destination = data.destination;
-  const stageIndex = assignment ? STAGES.findIndex((s) => s.key === assignment.status) : -1;
+  // Where the trip sits on the spine. `arrived` is the deprecated spelling of
+  // `at_scene`, so it is folded in rather than treated as an unknown stage.
+  const effectiveStatus = assignment?.status === 'arrived' ? 'at_scene' : assignment?.status;
+  const stageIndex = assignment ? STAGES.findIndex((s) => s.key === effectiveStatus) : -1;
   const destLive = destination ? facilities[destination.id]?.capacity : null;
   const cap = destLive ?? data.destination_capacity;
 
@@ -210,8 +359,20 @@ export default function CrewScreen() {
           <Card style={{ gap: space.md }}>
             <Row justify="space-between" align="center">
               <Stack gap="xxs">
-                <Heading>No active assignment</Heading>
-                <Small muted>{data.message ?? 'Waiting for the next dispatch from the 108 console.'}</Small>
+                <Heading>
+                  {/*
+                    "No assignment" and "this account has no vehicle" look the
+                    same from the driver's seat and are completely different
+                    problems. The second one never resolves on its own and needs
+                    somebody else to act, so the screen says which it is and who
+                    to contact, instead of leaving a driver to wait for a
+                    dispatch that cannot arrive.
+                  */}
+                  {data.action_required ? 'No vehicle linked to this account' : 'No active assignment'}
+                </Heading>
+                <Small muted>
+                  {data.message ?? 'Waiting for the next dispatch from the 108 console.'}
+                </Small>
               </Stack>
               <Pill label={connected ? 'connected' : 'offline'} tone={connected ? 'live' : 'stale'} icon={connected ? 'wifi' : 'wifiOff'} compact />
             </Row>
@@ -221,7 +382,25 @@ export default function CrewScreen() {
                 <Stat label="Vehicle" value={data.ambulance.call_sign} sub={data.ambulance.operator_name} />
               </Stack>
             ) : null}
-            <Button label="Refresh" icon="refresh" onPress={() => load()} />
+
+            {data.action_required ? (
+              <Banner
+                tone="warm"
+                icon="alert"
+                title="A dispatcher has to fix this"
+                body={data.action_required}
+              />
+            ) : null}
+
+            <Row gap="xs" style={{ flexWrap: 'wrap' }}>
+              <Button label="Refresh" icon="refresh" onPress={() => load()} />
+              <Button
+                label="Call 108 control"
+                icon="phone"
+                variant="secondary"
+                onPress={() => Linking.openURL('tel:108')}
+              />
+            </Row>
           </Card>
           <Button label="Open the public directory" icon="hospital" onPress={() => router.push('/')} />
         </Stack>
@@ -237,12 +416,26 @@ export default function CrewScreen() {
       subtitle={`${assignment.reference} · ${statusLabel}`}
       maxWidth={900}
       actions={
-        <Pill
-          label={offline ? 'cached' : connected ? 'live' : 'offline'}
-          tone={offline ? 'warm' : connected ? 'live' : 'stale'}
-          icon={offline ? 'wifiOff' : 'wifi'}
-          compact
-        />
+        <Row gap="xs" align="center">
+          {/* Position reporting is stated rather than assumed. A crew told to
+              keep the app open for tracking needs to be able to see that it is
+              actually happening, and a dispatcher asking "where are you" is a
+              worse way to find out that it stopped. */}
+          {data?.assignment ? (
+            <Pill
+              label={lastFixAt ? `GPS ${elapsed((Date.now() - lastFixAt) / 1000)}` : 'GPS —'}
+              tone={lastFixAt && Date.now() - lastFixAt < 90_000 ? 'live' : 'stale'}
+              icon="pin"
+              compact
+            />
+          ) : null}
+          <Pill
+            label={offline ? 'cached' : connected ? 'live' : 'offline'}
+            tone={offline ? 'warm' : connected ? 'live' : 'stale'}
+            icon={offline ? 'wifiOff' : 'wifi'}
+            compact
+          />
+        </Row>
       }
       footerNote={
         hasDirections()
@@ -255,16 +448,80 @@ export default function CrewScreen() {
         contentContainerStyle={{ paddingBottom: space.xxxl, gap: space.lg }}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => load()} />}
       >
+        {/*
+          Offline state, stated twice on purpose.
+
+          The banner is the polite version. The second line is the one that
+          matters clinically: a crew planning around "4 ICU beds" needs to know
+          whether that number was taken four minutes or four hours ago, and
+          burying it in a paragraph of grey text is how a stale figure gets used
+          as a live one. So the age is rendered as a number, in the same visual
+          weight as the capacity it qualifies.
+        */}
         {offline ? (
-          <Banner
-            tone="warm"
-            icon="wifiOff"
-            title="Working from the last received assignment"
-            body={`Cached ${cachedAt ? elapsed((Date.now() - cachedAt) / 1000) : '—'} ago. Reconnecting automatically. Capacity figures may be out of date — call the facility if the situation is time-critical.`}
-          />
+          <Stack gap="xs">
+            <Banner
+              tone="warm"
+              icon="wifiOff"
+              title="Offline — no signal"
+              body="Showing the last assignment we received. Reconnecting automatically."
+            />
+            {/* The age, as the largest thing under the banner rather than a
+                clause in a sentence. A crew reads a number; "capacity and ETA
+                from 15 min ago" in 11.5px grey is a number that gets skimmed,
+                and the figure it qualifies -- ICU: 2 -- is 20px and coloured.
+                The two have to be the same size or the smaller one loses. */}
+            <Card tone={stale ? 'critical' : 'warm'} style={{ gap: space.xs }}>
+              <Row justify="space-between" align="baseline" gap="sm" style={{ flexWrap: 'wrap' }}>
+                <Stack gap={2} style={{ minWidth: 180 }}>
+                  <Label style={{ fontSize: 10 }}>Capacity last confirmed</Label>
+                  <Num size={isDesktop ? 22 : 19} weight="700" color={stale ? t.status.critical.base : t.fg.strong}>
+                    {cachedAt ? `${elapsed((Date.now() - cachedAt) / 1000)} ago` : 'unknown'}
+                  </Num>
+                </Stack>
+                {cachedAt ? <Pill tone={stale ? 'critical' : 'warm'} icon="clock" compact label="not live" /> : null}
+              </Row>
+              {stale ? (
+                <Body style={{ fontSize: 12, color: t.status.critical.base }}>
+                  Old enough to be wrong. Call the receiving desk before relying on availability — the ICU count may
+                  already be zero.
+                </Body>
+              ) : (
+                <Small muted style={{ fontSize: 12 }}>
+                  Call the receiving desk before relying on availability if the situation is time-critical.
+                </Small>
+              )}
+            </Card>
+          </Stack>
         ) : null}
 
         {error ? <Banner tone="critical" icon="alert" title="Action failed" body={error} /> : null}
+
+        {/* A call taken without a handset location is plotted at the district
+            centre. The crew still has to be told, because the map on this
+            screen then points at a town hall twelve kilometres from the patient
+            and the first thing they will do at that pin is look for someone. */}
+        {assignment.location_approximate ? (
+          <Banner
+            tone="warm"
+            icon="pin"
+            title="Pickup point is approximate"
+            body={
+              'The caller gave no location, so the scene is plotted at the district centre' +
+              (assignment.taluk ? ` near ${assignment.taluk}` : '') +
+              '. Confirm the address with the control room before you commit to the pin.'
+            }
+          />
+        ) : null}
+
+        {assignment.destination_withdrawn && !destination ? (
+          <Banner
+            tone="critical"
+            icon="alert"
+            title="Receiving facility withdrew"
+            body="The destination you were sent to has declined this patient and its bed holds are released. Hold position if clinically safe and take a new destination from the control room."
+          />
+        ) : null}
 
         {/* Priority banner -------------------------------------------------- */}
         <Card
@@ -302,7 +559,7 @@ export default function CrewScreen() {
                 handoff, not an embed: a crew wants the app with the voice
                 prompts, offline tiles and live traffic they already trust. */}
             <Button
-              label="Navigate"
+              label="Open Google Maps"
               icon="route"
               variant="primary"
               size="lg"
@@ -325,8 +582,23 @@ export default function CrewScreen() {
               size="lg"
               onPress={() => Linking.openURL(`tel:${destination.phone.replace(/[^\d+]/g, '')}`)}
             />
+            {/*
+              This button said "Handoff to hospital desk" and dialled 108 — the
+              emergency control room — so a crew calling to announce their
+              arrival reached dispatch instead of the ward that was waiting for
+              them, and dispatch had to relay it. It now dials the receiving
+              facility, and the control room has its own button next to it,
+              labelled as such.
+            */}
             <Button
-              label="Handoff to hospital desk"
+              label="Call the receiving desk"
+              icon="phone"
+              size="lg"
+              variant="secondary"
+              onPress={() => Linking.openURL(`tel:${destination.phone.replace(/[^\d+]/g, '')}`)}
+            />
+            <Button
+              label="Call 108 control"
               icon="flag"
               size="lg"
               onPress={() => Linking.openURL('tel:108')}
@@ -337,19 +609,32 @@ export default function CrewScreen() {
           </Row>
         </Card>
 
-        {/* Route ----------------------------------------------------------- */}
-        <MapSurface
-          center={{ lat: destination.lat, lng: destination.lng }}
-          zoom={11}
-          points={destinationPoint ? [destinationPoint] : []}
-          height={isDesktop ? 280 : 220}
-          origin={data.route?.origin ?? { lat: assignment.lat, lng: assignment.lng }}
-          originLabel={data.ambulance?.call_sign ?? 'Unit'}
-          route={{
-            from: data.route?.origin ?? { lat: assignment.lat, lng: assignment.lng },
-            to: { lat: destination.lat, lng: destination.lng },
-          }}
-        />
+        {/* Route -----------------------------------------------------------
+            A picture, not a navigator. The corridor shows where the patient is
+            going and roughly which way; the turn-by-turn the crew actually
+            follows lives in their own navigation app, and the button below is
+            labelled as the handoff to it rather than as "Navigate", which would
+            promise something this screen does not do. */}
+        <Stack gap="xs">
+          <Row justify="space-between" align="center" gap="sm" style={{ flexWrap: 'wrap' }}>
+            <Label>Route overview · not turn-by-turn</Label>
+            <Small muted style={{ fontSize: 11 }}>
+              Turn-by-turn runs in Google Maps — open it from the button below.
+            </Small>
+          </Row>
+          <MapSurface
+            center={{ lat: destination.lat, lng: destination.lng }}
+            zoom={11}
+            points={destinationPoint ? [destinationPoint] : []}
+            height={isDesktop ? 280 : 220}
+            origin={data.route?.origin ?? { lat: assignment.lat, lng: assignment.lng }}
+            originLabel={data.ambulance?.call_sign ?? 'Unit'}
+            route={{
+              from: data.route?.origin ?? { lat: assignment.lat, lng: assignment.lng },
+              to: { lat: destination.lat, lng: destination.lng },
+            }}
+          />
+        </Stack>
 
 
         {/* Trip controls --------------------------------------------------- */}
@@ -385,15 +670,22 @@ export default function CrewScreen() {
         {/* Destination capacity + alternatives ----------------------------- */}
         <Row gap="lg" align="flex-start" style={{ flexWrap: 'wrap' }}>
           <Card style={{ flex: 1, minWidth: 280, gap: space.md }}>
-            <Row justify="space-between" align="center">
+            <Row justify="space-between" align="center" gap="sm" style={{ flexWrap: 'wrap' }}>
               <Heading>What to expect on arrival</Heading>
-              {cap ? (
-                <Pill
-                  label={`ED ${cap.ed_congestion}`}
-                  tone={congestionStatus(cap.ed_congestion)}
-                  compact
-                />
-              ) : null}
+              <Row gap="xs" align="center">
+                {/* The counters below are 20px and coloured, so they read as
+                    current whatever the header says. While the screen is
+                    showing a cached payload they are labelled where they are
+                    read, not only in the banner at the top of the page. */}
+                {offline ? <Pill label="not live" tone="warm" icon="wifiOff" compact outline /> : null}
+                {cap ? (
+                  <Pill
+                    label={`ED ${cap.ed_congestion}`}
+                    tone={congestionStatus(cap.ed_congestion)}
+                    compact
+                  />
+                ) : null}
+              </Row>
             </Row>
 
             {cap ? (

@@ -17,6 +17,7 @@ quarantined).
 from __future__ import annotations
 
 import json
+import logging
 from datetime import timedelta
 
 from sqlalchemy import select
@@ -28,6 +29,8 @@ from ..models import Hospital, Incident, Notification, NotificationKind, User, U
 # treated as stale. Not deleted -- an inbound alert that nobody read is exactly
 # the sort of thing a review needs to be able to find later.
 RETENTION_DAYS = 30
+
+log = logging.getLogger("medmesh.notifications")
 
 
 def notify_facility(
@@ -315,3 +318,74 @@ def remind_stale(db: Session, *, threshold_minutes: int = 120) -> list[Notificat
             )
         )
     return created
+
+
+def send_email(*, to: str, subject: str, body: str, sensitive: bool = False) -> bool:
+    """Outbound mail.
+
+    The pilot has no mail transport, so this logs the fact of a send and returns.
+    It exists as a function so that the production wiring is a one-line change
+    here rather than an edit at every call site, and so that the *absence* of a
+    transport is visible: a caller can tell the difference between "delivered"
+    and "no transport configured" instead of assuming the message went out.
+
+    `sensitive` marks bodies that must not be written to the log. The reset link
+    is the reason the parameter exists -- a token in the log file is a token in
+    every backup of the log file.
+    """
+    if sensitive:
+        log.info("outbound email suppressed from logs (sensitive) to %s — %s", _mask(to), subject)
+    else:
+        log.info("outbound email to %s — %s", _mask(to), subject)
+        log.debug("email body: %s", body[:200])
+    return False  # no transport configured
+
+
+def deliver_reset_link(db: Session, user: User, *, token: str, ttl_minutes: int) -> None:
+    """Issue a password-reset link to the account holder.
+
+    Goes through this module rather than sending from the router so that the
+    pilot's no-op transport and a production mail provider are the same call
+    site. The link is passed to `send_email` and deliberately *not* stored:
+
+    the operator inbox is readable by platform administrators, so a persisted
+    token would turn the inbox into a credential store -- an administrator could
+    take over any account by reading the queue rather than by using the accounts
+    API, which at least records what they did.
+
+    The inbox entry therefore says that a reset was requested, and the token
+    travels only over the delivery channel.
+    """
+    link_base = "medmesh://reset"
+    send_email(
+        to=user.email,
+        subject="MedMesh password reset",
+        body=(
+            f"A password reset was requested for {user.email}.\n\n"
+            f"Open this link within {ttl_minutes} minutes to choose a new password:\n"
+            f"{link_base}?token={token}\n\n"
+            "If this was not you, no action is needed: your password is unchanged "
+            "and the link expires on its own."
+        ),
+        sensitive=True,
+    )
+    notify_user(
+        db,
+        user_id=user.id,
+        kind=NotificationKind.AUTH_PASSWORD_RESET,
+        title="Password reset requested",
+        body=(
+            f"A reset link was sent to {_mask(user.email)} and expires in {ttl_minutes} minutes. "
+            "If you did not request it, tell your platform administrator."
+        ),
+        severity="warm",
+    )
+
+
+def _mask(email: str) -> str:
+    """Enough of an address to recognise, not enough to harvest."""
+    local, _, domain = email.partition("@")
+    if not domain:
+        return "***"
+    keep = local[:2]
+    return f"{keep}{'*' * max(1, len(local) - 2)}@{domain}"

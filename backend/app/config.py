@@ -31,6 +31,23 @@ class Settings(BaseSettings):
     access_token_ttl_minutes: int = 60 * 12
     refresh_token_ttl_days: int = 14
 
+    # Whether this deployment may publish its pilot credentials.
+    #
+    # The sign-in screen used to carry them as literal constants, which meant
+    # every copy of the codebase shipped a working administrator password. They
+    # are now served by the API only when this flag is on, and the flag defaults
+    # to off -- so a deployment that forgets to configure it fails closed, with
+    # an empty sign-in screen rather than a published one. The pilot turns it on;
+    # the production compose file does not.
+    demo_mode: bool = False
+
+    # Echo a password-reset token in the HTTP response. Only ever meaningful
+    # with no mail transport configured, which is the pilot's situation. Gated
+    # separately from `demo_mode` because a demo instance may still want real
+    # reset behaviour, and because tying them together would silently switch
+    # this on wherever the demo flag is set.
+    expose_password_reset_token: bool = False
+
     # --- Trust engine thresholds (minutes) --------------------------------
     freshness_live_minutes: int = 15
     freshness_warm_minutes: int = 60

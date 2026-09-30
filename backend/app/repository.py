@@ -176,12 +176,20 @@ def trust_scores(db: Session, hospitals: list[Hospital], *, relaxed: bool = Fals
 
 
 def open_incidents(db: Session, *, district_id: int | None = None) -> list[Incident]:
-    live = (
-        IncidentStatus.OPEN,
-        IncidentStatus.DISPATCHED,
-        IncidentStatus.EN_ROUTE,
-        IncidentStatus.ARRIVED,
-    )
+    """Every trip that is still running.
+
+    The list is derived from the lifecycle's terminal states rather than written
+    out by hand. The hand-written version stopped at `arrived`, so the moment the
+    trip model gained the states between scene arrival and handover, a patient
+    being transported in the back of an ambulance dropped out of the dispatcher's
+    queue, out of the "incidents open" counter and out of the district rollup --
+    while the vehicle itself stayed committed. Defining it as a complement means
+    a new state is in the queue by default, which is the safe direction for this
+    particular list.
+    """
+    from .services.lifecycle import TERMINAL_STATES
+
+    live = tuple(st for st in IncidentStatus if st not in TERMINAL_STATES)
     stmt = select(Incident).where(Incident.status.in_(live))
     if district_id is not None:
         stmt = stmt.where(Incident.district_id == district_id)
@@ -189,7 +197,35 @@ def open_incidents(db: Session, *, district_id: int | None = None) -> list[Incid
 
 
 def ambulance_for_user(db: Session, user: User) -> Ambulance | None:
-    return db.execute(select(Ambulance).where(Ambulance.driver_id == user.id)).scalar_one_or_none()
+    """The vehicle a driver account is linked to.
+
+    The platform's rule is one driver, one active vehicle: a crew account is a
+    person who drives a specific ambulance, and every screen on their device is
+    built around "my unit". The previous version of this function expressed that
+    rule as `scalar_one_or_none()`, which does not enforce anything -- it just
+    raises `MultipleResultsFound` the first time somebody links a second vehicle,
+    turning a data-entry mistake into a 500 on the driver's screen mid-trip.
+
+    So the rule is now enforced where it belongs (a partial unique index on
+    `driver_id`, plus an explicit unassign in the assignment endpoint) and this
+    read is written to be total: if the invariant is ever violated by a path we
+    have not thought of, the driver gets a working screen for one of their
+    vehicles rather than a stack trace. The lowest id wins so the answer is at
+    least stable across calls.
+    """
+    return db.execute(
+        select(Ambulance).where(Ambulance.driver_id == user.id).order_by(Ambulance.id).limit(1)
+    ).scalar_one_or_none()
+
+
+def ambulances_for_user(db: Session, user: User) -> list[Ambulance]:
+    """Every vehicle linked to a driver. Used by the admin screen to surface a
+    broken link, and by the invariant check in the test suite."""
+    return list(
+        db.execute(select(Ambulance).where(Ambulance.driver_id == user.id).order_by(Ambulance.id))
+        .scalars()
+        .all()
+    )
 
 
 def visible_district_ids(db: Session, user: User | None) -> list[int] | None:

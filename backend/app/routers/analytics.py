@@ -39,7 +39,7 @@ from ..models import (
 from ..repository import active_holds, active_surge, open_incidents
 from ..schemas import SurgeCreate
 from ..security import CurrentUser, OptionalUser, require_roles
-from ..services import audit
+from ..services import audit, lifecycle
 
 router = APIRouter(prefix="/analytics", tags=["analytics"])
 
@@ -130,26 +130,65 @@ def _district_rollup(db: Session, district: District) -> dict:
 
 
 @router.get("/overview")
-def overview(user: OptionalUser, db: Session = Depends(get_db)):
+def overview(
+    user: User = Depends(require_roles(UserRole.GOV_OFFICIAL, UserRole.PLATFORM_ADMIN)),
+    db: Session = Depends(get_db),
+):
     """State-level header plus per-district rows. One call powers the entire
-    government dashboard above the fold."""
-    districts = list(db.execute(select(District).order_by(District.name)).scalars().all())
+    government dashboard above the fold.
+
+    Authenticated, and role-scoped at that. It used to accept an optional
+    credential, which meant the payload below -- open incidents, the size of the
+    available fleet, how many bed holds are live right now and where the surge
+    flag is set -- was world-readable. The public portal does not call this
+    endpoint and has no need for any of it: it has the facility directory, which
+    says where care is available without saying where the ambulances are.
+
+    Jurisdiction applies to the whole payload, not just to the district table.
+    The previous version filtered nothing: a district officer's dashboard showed
+    every one of the 38 districts' capacity, fleet, incident and feedback totals
+    under a heading that said "state". A scoped account was given statewide
+    visibility of the operational picture and no way to tell, which is the same
+    class of mistake as serving an unscoped export -- the number of districts
+    in the response is itself the leak.
+
+    An unscoped government account (`district_id is None`) is the state
+    directorate and keeps the full view, because that is what the role means.
+    """
+    district_ids = _district_ids(db, user)
+    allowed = set(district_ids)
+
+    districts = [
+        d
+        for d in db.execute(select(District).order_by(District.name)).scalars().all()
+        if d.id in allowed
+    ]
     rows = [_district_rollup(db, d) for d in districts]
     rows.sort(key=lambda r: -(r["beds"]["occupancy_pct"] or 0))
 
-    hospitals = list(db.execute(select(Hospital)).scalars().all())
+    hospitals = [
+        h for h in db.execute(select(Hospital)).scalars().all() if h.district_id in allowed
+    ]
     facility_total_beds = sum(h.total_beds for h in hospitals)
     facility_total_icu = sum(h.total_icu for h in hospitals)
     live_beds = sum((live_store.get(h.id).beds_effective if live_store.get(h.id) else 0) for h in hospitals)
     live_icu = sum((live_store.get(h.id).icu_effective if live_store.get(h.id) else 0) for h in hospitals)
 
-    fleet = list(db.execute(select(Ambulance)).scalars().all())
+    fleet = [a for a in db.execute(select(Ambulance)).scalars().all() if a.base_district_id in allowed]
     incidents_today = db.execute(
-        select(func.count()).select_from(Incident).where(Incident.created_at >= utcnow() - timedelta(hours=24))
+        select(func.count())
+        .select_from(Incident)
+        .where(Incident.created_at >= utcnow() - timedelta(hours=24), Incident.district_id.in_(allowed))
     ).scalar_one()
-    open_now = len(open_incidents(db))
+    open_now = len([i for i in open_incidents(db) if i.district_id in allowed])
+    # Feedback carries no district of its own -- it is filed against a facility,
+    # so jurisdiction is read through that facility. Joining rather than
+    # filtering in Python keeps this a single count against a large table.
     pend_feedback = db.execute(
-        select(func.count()).select_from(Feedback).where(Feedback.status == FeedbackStatus.OPEN)
+        select(func.count())
+        .select_from(Feedback)
+        .join(Hospital, Hospital.id == Feedback.hospital_id)
+        .where(Feedback.status == FeedbackStatus.OPEN, Hospital.district_id.in_(allowed))
     ).scalar_one()
     surge = active_surge(db)
 
@@ -527,14 +566,42 @@ def export_incidents(
 ):
     """Incident export for policy review. Every column here is non-identifying by
     construction -- the schema has nowhere to put a patient."""
+    # Jurisdiction, same as every other government read. The export was the one
+    # place where a scoped account could still obtain the whole state: it
+    # filtered on nothing, so a district officer downloading their own
+    # district's incidents received every incident in Tamil Nadu, in a file, with
+    # no interface to suggest anything had been widened.
+    allowed = set(_district_ids(db, user))
     since = utcnow() - timedelta(days=days)
-    stmt = select(Incident).where(Incident.created_at >= since)
+    stmt = select(Incident).where(Incident.created_at >= since, Incident.district_id.in_(allowed))
     incidents = list(db.execute(stmt.order_by(Incident.created_at.desc())).scalars().all())
-    hospitals = {h.id: h for h in db.execute(select(Hospital)).scalars().all()}
+    hospitals = {
+        h.id: h for h in db.execute(select(Hospital)).scalars().all() if h.district_id in allowed
+    }
+
+    def _iso(value) -> str:
+        """ISO-8601 with an explicit Z. Naive UTC throughout, as stored."""
+        return value.isoformat() + "Z" if value else ""
+
+    def _span(start, end):
+        """Seconds between two timestamps, or None if either is missing."""
+        return (end - start).total_seconds() if start and end else None
+
+    def minutes(seconds: float | None) -> float | str:
+        return round(seconds / 60, 2) if seconds is not None else ""
 
     def rows():
         buf = io.StringIO()
         writer = csv.writer(buf)
+        # One column per interval the operational question actually asks about.
+        #
+        # The previous export carried a single "time_to_hospital_minutes" that
+        # was computed as `arrived_at - created_at`. `arrived_at` is set when the
+        # crew reaches the *scene*, so the column named for the hospital was in
+        # fact the whole call-to-scene period, including dispatch delay and the
+        # drive out. Any policy decision taken off that number was taken off a
+        # mislabelled one. The stages are now separate columns, and each is
+        # computed from the timestamp pair that measures it.
         writer.writerow(
             [
                 "reference",
@@ -543,14 +610,24 @@ def export_incidents(
                 "urgency",
                 "district_id",
                 "landmark",
+                "location_source",
                 "status",
                 "assigned_hospital_id",
                 "assigned_hospital",
                 "requires_icu",
                 "requires_ventilator",
                 "requires_blood",
-                "dispatch_minutes",
-                "time_to_hospital_minutes",
+                "call_to_dispatch_minutes",
+                "dispatch_to_scene_minutes",
+                "scene_to_patient_onboard_minutes",
+                "scene_to_hospital_minutes",
+                "hospital_arrival_to_handover_minutes",
+                "total_response_minutes",
+                "dispatched_at_utc",
+                "scene_arrived_at_utc",
+                "patient_onboard_at_utc",
+                "hospital_arrived_at_utc",
+                "handed_over_at_utc",
             ]
         )
         yield buf.getvalue()
@@ -558,6 +635,7 @@ def export_incidents(
         buf.truncate(0)
         for i in incidents:
             hospital = hospitals.get(i.assigned_hospital_id)
+            marks = lifecycle.intervals(i)
             writer.writerow(
                 [
                     i.reference,
@@ -566,14 +644,24 @@ def export_incidents(
                     i.urgency.value,
                     i.district_id,
                     i.landmark,
+                    getattr(i.location_source, "value", "") or "",
                     i.status.value,
                     i.assigned_hospital_id or "",
                     hospital.name if hospital else "",
                     "yes" if i.requires_icu else "no",
                     "yes" if i.requires_ventilator else "no",
                     "yes" if i.requires_blood else "no",
-                    round((i.dispatched_at - i.created_at).total_seconds() / 60, 2) if i.dispatched_at else "",
-                    round((i.arrived_at - i.created_at).total_seconds() / 60, 2) if i.arrived_at else "",
+                    minutes(marks["call_to_dispatch_seconds"]),
+                    minutes(marks["dispatch_to_scene_seconds"]),
+                    minutes(marks["scene_to_load_seconds"]),
+                    minutes(_span(i.scene_arrived_at, i.hospital_arrived_at)),
+                    minutes(marks["handover_seconds"]),
+                    minutes(marks["total_seconds"]),
+                    _iso(i.dispatched_at),
+                    _iso(i.scene_arrived_at),
+                    _iso(i.patient_onboard_at),
+                    _iso(i.hospital_arrived_at),
+                    _iso(i.handed_over_at),
                 ]
             )
             yield buf.getvalue()
@@ -589,14 +677,28 @@ def export_incidents(
 
 
 @router.get("/sla")
-def sla_report(user: CurrentUser, db: Session = Depends(get_db), days: int = Query(default=7, ge=1, le=90)):
+def sla_report(
+    user: User = Depends(require_roles(UserRole.PLATFORM_ADMIN, UserRole.GOV_OFFICIAL)),
+    db: Session = Depends(get_db),
+    days: int = Query(default=7, ge=1, le=90),
+):
     """Operational SLA numbers for the platform team's own dashboard. Median
     dispatch latency is the headline metric -- it is the number the whole
     platform exists to move."""
+    # Platform-team metric, so the role gate above is the primary control; the
+    # jurisdiction filter below keeps a district officer's version of this page
+    # honest if they are given access, and keeps the ingest counters from
+    # counting a neighbouring district's samples.
+    allowed = set(_district_ids(db, user))
+
     since = utcnow() - timedelta(days=days)
-    incidents = list(
-        db.execute(select(Incident).where(Incident.created_at >= since).order_by(Incident.created_at)).scalars().all()
-    )
+    incidents = [
+        i
+        for i in db.execute(
+            select(Incident).where(Incident.created_at >= since).order_by(Incident.created_at)
+        ).scalars().all()
+        if i.district_id in allowed
+    ]
 
     dispatch_secs = [
         (i.dispatched_at - i.created_at).total_seconds()
@@ -612,13 +714,20 @@ def sla_report(user: CurrentUser, db: Session = Depends(get_db), days: int = Que
         idx = min(len(ordered) - 1, int(round((len(ordered) - 1) * p)))
         return round(ordered[idx], 1)
 
+    facility_ids = {h.id for h in db.execute(select(Hospital)).scalars().all() if h.district_id in allowed}
     total_samples = db.execute(
-        select(func.count()).select_from(CapacityRecord).where(CapacityRecord.recorded_at >= since)
+        select(func.count())
+        .select_from(CapacityRecord)
+        .where(CapacityRecord.recorded_at >= since, CapacityRecord.hospital_id.in_(facility_ids))
     ).scalar_one()
     quarantined_samples = db.execute(
         select(func.count())
         .select_from(CapacityRecord)
-        .where(CapacityRecord.recorded_at >= since, CapacityRecord.quarantined.is_(True))
+        .where(
+            CapacityRecord.recorded_at >= since,
+            CapacityRecord.quarantined.is_(True),
+            CapacityRecord.hospital_id.in_(facility_ids),
+        )
     ).scalar_one()
 
     return {

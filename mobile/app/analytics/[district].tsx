@@ -3,6 +3,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { Pressable, RefreshControl, ScrollView, StyleSheet, View } from 'react-native';
 
 import { api, ApiError, API_BASE } from '../../src/api/client';
+import { downloadCsv } from '../../src/lib/download';
 import type { DistrictDetail } from '../../src/api/types';
 import { ageFromSeconds, elapsed } from '../../src/lib/format';
 import { useAuth } from '../../src/state/AuthProvider';
@@ -43,8 +44,36 @@ export default function DistrictDetailScreen() {
 
   const [data, setData] = useState<DistrictDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [hours, setHours] = useState(24);
+
+  /**
+   * Export this district's capacity window.
+   *
+   * The export endpoint is role-gated, so the file has to be fetched with the
+   * token attached and then handed to the browser as a download. Opening it as
+   * a bare URL -- which is what this button used to do -- produced a tab
+   * containing the API's 401 body for every signed-in officer, and silently
+   * dropped the district filter that the button is *for*.
+   */
+  const exportCapacity = async () => {
+    setBusy('export');
+    setError(null);
+    try {
+      const { filename } = await downloadCsv(
+        `/analytics/export/capacity.csv?hours=${hours}&district_id=${districtId}`,
+        `medmesh-capacity-${districtId}.csv`,
+      );
+      setNotice(`Exported ${filename}.`);
+    } catch (e) {
+      setNotice(null);
+      setError(e instanceof ApiError ? e.message : 'Export failed — nothing was downloaded.');
+    } finally {
+      setBusy(null);
+    }
+  };
 
   const load = useCallback(
     async (silent = false) => {
@@ -109,11 +138,8 @@ export default function DistrictDetailScreen() {
             label="Export"
             icon="download"
             size="sm"
-            onPress={() => {
-              if (typeof window !== 'undefined') {
-                window.open(`/api/v1/analytics/export/capacity.csv?hours=${hours}&district_id=${districtId}`, '_blank');
-              }
-            }}
+            loading={busy === 'export'}
+            onPress={exportCapacity}
           />
         </Row>
       }
@@ -125,6 +151,12 @@ export default function DistrictDetailScreen() {
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => load()} />}
       >
         {error ? <Banner tone="critical" icon="alert" title="Partial data" body={error} /> : null}
+
+        {notice ? (
+          <Row gap="sm" align="center">
+            <Pill label={notice} tone="live" icon="download" compact />
+          </Row>
+        ) : null}
 
         {!data.access.drilldown_enabled ? (
           <Banner

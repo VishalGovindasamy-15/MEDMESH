@@ -54,6 +54,7 @@ from .models import (
     utcnow,
 )
 from .security import hash_password
+from .services.references import SPECIALTY_KEYS
 
 log = logging.getLogger("medmesh.seed")
 
@@ -72,27 +73,9 @@ from .data.tn_districts import TN_DISTRICTS, TN_FACILITIES  # noqa: E402
 
 DISTRICTS = list(TN_DISTRICTS)
 
-SPECIALTY_POOL = [
-    "general_medicine",
-    "general_surgery",
-    "orthopaedics",
-    "cardiology",
-    "neurology",
-    "neurosurgery",
-    "paediatrics",
-    "obstetrics",
-    "gynaecology",
-    "burns",
-    "plastic_surgery",
-    "nephrology",
-    "pulmonology",
-    "critical_care",
-    "trauma",
-    "urology",
-    "gastroenterology",
-    "oncology",
-    "psychiatry",
-]
+# Populated from the shared catalogue so the seeder, the roster editor and
+# the matching chain cannot drift apart.
+SPECIALTY_POOL = list(SPECIALTY_KEYS)
 
 DOCTOR_NAMES = [
     "Anbarasan R",
@@ -693,17 +676,75 @@ def seed_all(db: Session, *, with_history: bool = True) -> dict:
     cbe = district_by_code["CBE"]
     anchor = hospital_by_short["SRMC"]
 
+    # ---------------------------------------------------------------- accounts
+    #
+    # These are published pilot credentials: they are listed by the API whenever
+    # MEDMESH_DEMO_MODE is on, and the sign-in screen prints them. Two
+    # consequences follow, and both are handled here.
+    #
+    # First, they cannot be real credentials, which is why the strings are on the
+    # password policy's banned list -- an operator cannot "keep" a seeded
+    # password by choosing it again, so the published value stops working as soon
+    # as anybody completes the forced first-login change below.
+    #
+    # Second, `must_change_password` is *not* set on them. It is tempting to
+    # force a rotation here to demonstrate the flow, and it would be theatre:
+    # the password is published by the API and printed on the sign-in screen, so
+    # requiring a change on first use protects nothing and makes the pilot
+    # unusable by whoever opens it next. The flag belongs on the real path —
+    # every account created through POST /governance/users is flagged, and that
+    # is where the flow is genuinely load-bearing, because there the
+    # administrator knows the password and the holder does not yet.
     accounts = [
-        dict(email="admin@medmesh.in", full_name="Platform Operations", role=UserRole.PLATFORM_ADMIN, pw="MedMesh@2026"),
+        dict(
+            # Not flagged for rotation, unlike the facility accounts below: the
+            # published platform credential has to be usable on a fresh clone,
+            # and the pilot's evaluator needs to reach the provisioning screen to
+            # exercise that flow. The accounts *it* creates are all flagged.
+            email="admin@medmesh.in",
+            full_name="Platform Operations",
+            role=UserRole.PLATFORM_ADMIN,
+            pw="MedMesh@2026",
+            must_change_password=False,
+        ),
         dict(email="dispatch@medmesh.in", full_name="R. Karthikeyan", role=UserRole.DISPATCHER, district_id=cbe.id, pw="Dispatch@108"),
         dict(email="gov@medmesh.in", full_name="Dr. S. Rajalakshmi", role=UserRole.GOV_OFFICIAL, district_id=cbe.id, amr_scope="district", pw="District@2026"),
-        dict(email="admin@kgch.medmesh.in", full_name="Kovai Govt. General — Duty Office", role=UserRole.HOSPITAL_ADMIN, hospital_id=hospital_by_short["KGCH"].id, amr_scope="facility", pw="Hospital@2026"),
-        dict(email="admin@srmc.medmesh.in", full_name="Sri Ranga — Bed Control Desk", role=UserRole.HOSPITAL_ADMIN, hospital_id=anchor.id, amr_scope="facility", pw="Hospital@2026"),
+        dict(
+            email="admin@kgch.medmesh.in",
+            full_name="Kovai Govt. General — Duty Office",
+            role=UserRole.HOSPITAL_ADMIN,
+            hospital_id=hospital_by_short["KGCH"].id,
+            amr_scope="facility",
+            pw="Hospital@2026",
+            must_change_password=False,
+        ),
+        dict(
+            email="admin@srmc.medmesh.in",
+            full_name="Sri Ranga — Bed Control Desk",
+            role=UserRole.HOSPITAL_ADMIN,
+            hospital_id=anchor.id,
+            amr_scope="facility",
+            pw="Hospital@2026",
+            must_change_password=False,
+        ),
     ]
     for acc in accounts:
         pw = acc.pop("pw")
-        db.add(User(password_hash=hash_password(pw), **acc))
+        db.add(User(password_hash=hash_password(pw), created_at=acc.pop("created_at", utcnow()), **acc))
     db.flush()
+
+    # The citizen account the sign-in screen advertises. A citizen can also
+    # register their own at the same address -- this one exists so the
+    # demonstration has a populated lookup history from the first request.
+    if not db.execute(select(User).where(User.email == "citizen@medmesh.in")).scalar_one_or_none():
+        citizen = User(
+            email="citizen@medmesh.in",
+            full_name="Pilot Citizen",
+            role=UserRole.CITIZEN,
+            password_hash=hash_password("Citizen@2026"),
+        )
+        db.add(citizen)
+        db.flush()
 
     crew_user = User(
         email="crew@medmesh.in",

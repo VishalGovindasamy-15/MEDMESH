@@ -5,6 +5,7 @@ import { RefreshControl, ScrollView, StyleSheet, View } from 'react-native';
 import { api } from '../src/api/client';
 import type { District, Doctor } from '../src/api/types';
 import { specialtyLabel } from '../src/lib/format';
+import { useLive } from '../src/state/LiveProvider';
 import { useTheme } from '../src/theme/ThemeProvider';
 import { space } from '../src/theme/tokens';
 import {
@@ -38,6 +39,7 @@ export default function DoctorsScreen() {
   const { t } = useTheme();
   const router = useRouter();
   const { isDesktop, columns } = useResponsive();
+  const { subscribe } = useLive();
 
   const [doctors, setDoctors] = useState<Doctor[] | null>(null);
   const [specialties, setSpecialties] = useState<SpecialtyOption[]>([]);
@@ -69,6 +71,62 @@ export default function DoctorsScreen() {
 
   useEffect(() => {
     load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [onDutyOnly]);
+
+  /**
+   * Follow duty changes without waiting for a refresh.
+   *
+   * The directory is the one screen a member of the public uses to answer "can
+   * this hospital actually treat my father tonight", and a facility toggling a
+   * consultant on duty is exactly the event that changes the answer. It used to
+   * re-fetch only when the filter changed or the page was pulled down, so the
+   * board could be a whole shift stale while the toggle that made it stale had
+   * already been confirmed to the hospital administrator.
+   *
+   * The patch is applied in place rather than by re-fetching, because the
+   * payload carries everything the row renders and a full reload on every duty
+   * change across a 300-row directory would be both slow and visibly jumpy.
+   */
+  useEffect(() => {
+    const off = subscribe('doctor.duty', (event) => {
+      const payload = event.data as {
+        doctor_id?: number;
+        hospital_id?: number;
+        removed?: boolean;
+        on_duty?: boolean;
+      } | null;
+      if (!payload?.doctor_id) return;
+
+      setDoctors((current) => {
+        if (!current) return current;
+        const index = current.findIndex((d) => d.id === payload.doctor_id);
+        if (index === -1) {
+          // Not on screen. If they have just come on duty they may belong in
+          // this filtered view, so pull once rather than guess at the row.
+          if (payload.on_duty && onDutyOnly) void load();
+          return current;
+        }
+        if (payload.removed || payload.on_duty === false) {
+          // Gone from an on-duty-only board, kept (marked) when we are showing
+          // the whole roster -- dropping the row there would look like data loss.
+          return onDutyOnly ? current.filter((d) => d.id !== payload.doctor_id) : current;
+        }
+        return current.map((d, i) =>
+          i === index ? { ...d, on_duty: true, duty_state: 'on_duty' } : d,
+        );
+      });
+
+      // Counts on the specialty chips are server-derived, so they are refetched
+      // rather than patched. A chip that says "12 cardiologists" after one of
+      // them has gone off duty is the kind of small wrongness that erodes trust
+      // in the whole board.
+      void api
+        .get<{ results: SpecialtyOption[] }>('/hospitals/specialties')
+        .then((specs) => setSpecialties(specs.results.filter((x) => x.doctors > 0)))
+        .catch(() => undefined);
+    });
+    return off;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [onDutyOnly]);
 

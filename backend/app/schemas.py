@@ -13,8 +13,9 @@ import re
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
+from .services.geo import TN_BOUNDS
 from .models import (
     Bleeding,
     ConnectorKind,
@@ -23,6 +24,7 @@ from .models import (
     HospitalType,
     IncidentCategory,
     IntegrationMode,
+    LocationSource,
     Mechanism,
     ObservationFlag,
     PatientState,
@@ -146,15 +148,52 @@ class HospitalCreate(BaseModel):
 
 
 class DoctorCreate(BaseModel):
+    """A clinician entering the roster.
+
+    `registration_no` was required, which made the roster unusable in the field:
+    a bed-control clerk adding the surgeon on call has the name and the
+    specialty, and the registration number is in a file somewhere. It is now
+    optional, and a missing one is recorded as such rather than being invented —
+    the directory does not publish it, so the cost of not having it is zero and
+    the cost of blocking on it was that the roster stayed empty.
+
+    `department` and `shift` also became optional with sensible derivations, and
+    `shift_window` is accepted directly because that is the string the roster
+    screen displays.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
     hospital_id: int
     full_name: str = Field(min_length=2, max_length=120)
-    registration_no: str = Field(min_length=3, max_length=32)
+    registration_no: str | None = Field(default=None, max_length=32)
     specialty: str = Field(min_length=2, max_length=60)
-    department: str = Field(max_length=80)
-    designation: str = Field(max_length=60)
+    department: str | None = Field(default=None, max_length=80)
+    designation: str = Field(default="Consultant", max_length=60)
     shift: Literal["morning", "afternoon", "night", "on_call"] = "morning"
+    shift_window: str | None = Field(default=None, max_length=32)
     accepts_emergency: bool = True
+    on_duty: bool = False
     languages: str = Field(default="Tamil, English", max_length=80)
+
+
+class DoctorUpdate(BaseModel):
+    """Partial roster edit. Specialty is the field that matters most — the
+    matching chain starts there — so it is validated the same way on update as
+    on create."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    full_name: str | None = Field(default=None, min_length=2, max_length=120)
+    registration_no: str | None = Field(default=None, max_length=32)
+    specialty: str | None = Field(default=None, min_length=2, max_length=60)
+    department: str | None = Field(default=None, max_length=80)
+    designation: str | None = Field(default=None, max_length=60)
+    shift: Literal["morning", "afternoon", "night", "on_call"] | None = None
+    shift_window: str | None = Field(default=None, max_length=32)
+    accepts_emergency: bool | None = None
+    on_duty: bool | None = None
+    languages: str | None = Field(default=None, max_length=80)
 
 
 class DoctorDutyUpdate(BaseModel):
@@ -191,6 +230,40 @@ class IncidentCreate(BaseModel):
     lng: float = Field(ge=-180, le=180)
     landmark: str = Field(min_length=3, max_length=200)
     district_id: int
+
+    # Where the coordinate came from, and the two supporting place fields the
+    # intake design asks for. All optional so that a caller which predates them
+    # still works, but the console always fills them.
+    location_source: LocationSource = LocationSource.MAP
+    taluk: str | None = Field(default=None, max_length=80)
+
+    @model_validator(mode="after")
+    def _location_is_plausible(self) -> "IncidentCreate":
+        """Reject coordinates outside Tamil Nadu.
+
+        Not a substitute for a geocoder -- it is a guard against the failure that
+        actually happens: a stray decimal place, or a latitude copied where a
+        longitude belonged. Both put the scene in the Bay of Bengal or in
+        Kerala, and the matching engine would dutifully rank hospitals by the
+        drive time to the wrong one.
+        """
+        if not (TN_BOUNDS["lat_min"] <= self.lat <= TN_BOUNDS["lat_max"]):
+            raise ValueError(
+                f"latitude {self.lat:.4f} is outside Tamil Nadu "
+                f"({TN_BOUNDS['lat_min']}-{TN_BOUNDS['lat_max']})"
+            )
+        if not (TN_BOUNDS["lng_min"] <= self.lng <= TN_BOUNDS["lng_max"]):
+            raise ValueError(
+                f"longitude {self.lng:.4f} is outside Tamil Nadu "
+                f"({TN_BOUNDS['lng_min']}-{TN_BOUNDS['lng_max']})"
+            )
+        if self.location_source == LocationSource.DISTRICT:
+            # Permitted, because a call from a landline with the caller unable
+            # to say where they are is a real call and refusing it would be
+            # worse than dispatching on an approximate fix. But it is recorded
+            # as approximate so nobody later mistakes it for a survey.
+            pass
+        return self
 
     # Scene assessment — all closed enums, see models.py.
     patient_state: PatientState = PatientState.UNKNOWN
@@ -325,13 +398,44 @@ class HoldRequest(BaseModel):
 
 
 class StatusUpdate(BaseModel):
-    status: Literal["en_route", "at_scene", "transporting", "arrived", "handed_over", "closed", "cancelled"]
+    """A crew or dispatcher advancing the trip.
+
+    The full lifecycle vocabulary is accepted here, including the deprecated
+    `arrived` spelling, which is normalised rather than rejected so that an older
+    installed build does not start failing after a server upgrade.
+    """
+
+    status: Literal[
+        "dispatched",
+        "en_route",
+        "at_scene",
+        "patient_onboard",
+        "transporting",
+        "at_hospital",
+        "handed_over",
+        "closed",
+        "cancelled",
+        "arrived",  # deprecated alias for at_scene
+    ]
     note: str | None = Field(default=None, max_length=200)
+    #: Optional crew-reported position, so the map does not have to wait for the
+    #: separate location ping. Ignored for non-crew callers.
+    lat: float | None = Field(default=None, ge=-90, le=90)
+    lng: float | None = Field(default=None, ge=-180, le=180)
 
 
 class AmbulanceLocationUpdate(BaseModel):
-    lat: float
-    lng: float
+    """A position fix from a crew phone.
+
+    Bounded, and bounded to the state, for the same reason `IncidentCreate` is:
+    a transposed coordinate or a stray decimal place otherwise moves a vehicle
+    onto the console's map somewhere it is not. `StatusUpdate` already carried
+    these bounds; this one did not, so a handset with a broken GNSS could and did
+    paste `lat: 95.0` into the fleet.
+    """
+
+    lat: float = Field(ge=TN_BOUNDS["lat_min"], le=TN_BOUNDS["lat_max"])
+    lng: float = Field(ge=TN_BOUNDS["lng_min"], le=TN_BOUNDS["lng_max"])
 
 
 # --------------------------------------------------------------------------- #
@@ -369,3 +473,82 @@ class ReportQuery(BaseModel):
     from_ts: datetime | None = None
     to_ts: datetime | None = None
     format: Literal["csv", "json"] = "csv"
+
+
+# --------------------------------------------------------------------------- #
+# Fleet
+#
+# Ambulance management did not exist as an API at all: the fleet was created by
+# the seed script and never editable afterwards. That is why a driver could be an
+# account with no vehicle and no way for anyone to fix it -- the only path was to
+# re-run the seeder. These models make a vehicle and its crew ordinary
+# administrative records.
+# --------------------------------------------------------------------------- #
+
+
+class AmbulanceCreate(BaseModel):
+    call_sign: str = Field(min_length=3, max_length=24)
+    registration: str = Field(min_length=3, max_length=16)
+    operator_type: Literal["108", "private"] = "108"
+    operator_name: str = Field(min_length=2, max_length=80)
+    base_district_id: int
+    capabilities: list[Literal["bls", "als", "nicu", "mortuary"]] = Field(default_factory=lambda: ["bls"])
+    status: Literal["available", "out_of_service"] = "available"
+    lat: float | None = Field(default=None, ge=-90, le=90)
+    lng: float | None = Field(default=None, ge=-180, le=180)
+
+
+class AmbulanceUpdate(BaseModel):
+    """Every field optional: a partial edit is the common case (a unit is
+    re-based, or its capability changes on refit) and requiring the full body
+    would make the caller responsible for not clobbering the rest."""
+
+    call_sign: str | None = Field(default=None, min_length=3, max_length=24)
+    registration: str | None = Field(default=None, min_length=3, max_length=16)
+    operator_type: Literal["108", "private"] | None = None
+    operator_name: str | None = Field(default=None, min_length=2, max_length=80)
+    base_district_id: int | None = None
+    capabilities: list[Literal["bls", "als", "nicu", "mortuary"]] | None = None
+    lat: float | None = Field(default=None, ge=-90, le=90)
+    lng: float | None = Field(default=None, ge=-180, le=180)
+
+
+class AmbulanceCrewAssign(BaseModel):
+    """Link or unlink the driver account. `driver_user_id: null` unassigns.
+
+    Explicit null rather than a separate DELETE so that "this vehicle now has no
+    crew" is expressible in the same call that expresses "this vehicle now has
+    that crew", which is what a form actually does.
+    """
+
+    driver_user_id: int | None = None
+    reason: str | None = Field(default=None, max_length=200)
+
+
+class AmbulanceStatusUpdate(BaseModel):
+    status: Literal["available", "out_of_service"]
+    reason: str | None = Field(default=None, max_length=200)
+
+
+class FacilityResponse(BaseModel):
+    """A receiving facility answering an inbound alert.
+
+    Structured rather than free text, for the same reason incident intake is:
+    the reply has to be actioned by software (release the hold, re-open the
+    shortlist, tell the crew) and a sentence cannot be. `reason` is an enum and
+    becomes part of the reroute suggestion.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    response: Literal["accepted", "declined"]
+    reason: Literal[
+        "no_bed",
+        "no_icu",
+        "no_ventilator",
+        "no_specialist",
+        "theatre_unavailable",
+        "diversion",
+        "other",
+    ] | None = None
+    note: str | None = Field(default=None, max_length=200)

@@ -279,6 +279,29 @@ def list_users(
     }
 
 
+def _require_rotated_password(user: User) -> None:
+    """Refuse credential administration from an account that has not rotated.
+
+    A staff account is created with a one-time password that an administrator
+    hands over out of band. Until the holder replaces it, the credential is known
+    to at least one other person -- so letting that account mint or disable other
+    accounts extends a shared secret's authority over the platform's user base.
+
+    The gate is deliberately narrow. Everything else the account can do still
+    works, because a forced-change flag that freezes the entire product turns a
+    routine rotation into an outage; what it must not do is hand out more
+    credentials.
+    """
+    if user.must_change_password:
+        raise HTTPException(
+            status_code=http_status.HTTP_403_FORBIDDEN,
+            detail=(
+                "This account is still using its one-time password. Change it before "
+                "issuing or modifying other credentials."
+            ),
+        )
+
+
 @router.post("/users", status_code=http_status.HTTP_201_CREATED)
 def provision_user(
     payload: RegisterRequest,
@@ -287,6 +310,8 @@ def provision_user(
 ):
     """The only path that can mint an operational account. Kept behind
     platform_admin for the reason given in auth.py."""
+    _require_rotated_password(user)
+
     email = payload.email.lower().strip()
     if db.execute(select(User).where(User.email == email)).scalar_one_or_none():
         raise HTTPException(status_code=409, detail="That email is already registered")
@@ -305,6 +330,12 @@ def provision_user(
         hospital_id=payload.hospital_id,
         district_id=payload.district_id,
         amr_scope="facility" if payload.hospital_id else ("district" if payload.district_id else "state"),
+        # Every account an administrator mints starts on a one-time password.
+        # The administrator chooses the string and has to communicate it, so it
+        # is known to at least two people until the holder replaces it; the flag
+        # is what turns "please change this" into an enforced first step, and it
+        # is what stops that shared secret from being used to issue more.
+        must_change_password=True,
     )
     db.add(created)
     db.flush()
@@ -327,6 +358,8 @@ def set_user_active(
     user: User = Depends(require_roles(UserRole.PLATFORM_ADMIN)),
     db: Session = Depends(get_db),
 ):
+    _require_rotated_password(user)
+
     target = db.get(User, user_id)
     if target is None:
         raise HTTPException(status_code=404, detail="User not found")

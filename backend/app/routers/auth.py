@@ -22,6 +22,7 @@ from ..security import (
     issue_refresh_token,
     verify_password,
 )
+from ..config import settings
 from ..services import audit
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -41,6 +42,12 @@ def _user_payload(db: Session, user: User) -> dict:
         "district_id": user.district_id,
         "district_name": district.name if district else None,
         "scope": user.amr_scope,
+        # The shell reads this to pin the user on the change-password screen
+        # before anything else renders. Returning it with every sign-in means an
+        # administrator clearing the flag takes effect at the next login rather
+        # than whenever a token happens to expire.
+        "must_change_password": user.must_change_password,
+        "password_changed_at": user.password_changed_at.isoformat() + "Z" if user.password_changed_at else None,
         "last_login_at": user.last_login_at.isoformat() + "Z" if user.last_login_at else None,
     }
 
@@ -113,6 +120,13 @@ def register(payload: RegisterRequest, db: Session = Depends(get_db)) -> TokenRe
     if db.execute(select(User).where(User.email == email)).scalar_one_or_none():
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="An account with that email already exists")
 
+    # The same policy as a staff account. A citizen's sign-in is the key to their
+    # own lookup history, and the platform has no way to know whether the phone
+    # it runs on is shared.
+    from .passwords import _require_policy
+
+    _require_policy(payload.password)
+
     user = User(
         email=email,
         full_name=payload.full_name.strip(),
@@ -132,6 +146,95 @@ def register(payload: RegisterRequest, db: Session = Depends(get_db)) -> TokenRe
         expires_in=ttl,
         user=_user_payload(db, user),
     )
+
+
+@router.get("/demo-accounts")
+def demo_accounts() -> dict:
+    """The pilot's published sign-in credentials, if this deployment has any.
+
+    These were previously four string literals in the sign-in component, which
+    meant every build of the app -- pilot, staging, production -- carried a
+    working platform-administrator password in its JavaScript bundle. Moving them
+    behind a server flag does not make them secret in the pilot; it makes it
+    possible for a deployment to *not* have them, and it puts the decision in one
+    place instead of in a compiled artefact.
+
+    Returns an empty list when `MEDMESH_DEMO_MODE` is off, which is the default.
+    A production deployment that forgets to configure the flag therefore shows an
+    empty sign-in screen rather than an administrator's password.
+    """
+    if not settings.demo_mode:
+        return {
+            "demo_mode": False,
+            "environment": settings.environment,
+            "accounts": [],
+            "note": "This deployment does not publish pilot credentials.",
+        }
+    return {
+        "demo_mode": True,
+        "environment": settings.environment,
+        "accounts": DEMO_ACCOUNTS,
+        "note": (
+            "Pilot dataset. Every account below is seeded test data and the passwords are "
+            "published deliberately — rotate them before any real traffic. Staff accounts are "
+            "flagged for a forced password change on first sign-in."
+        ),
+    }
+
+
+#: Seeded pilot accounts, paired with what each one is for. Descriptions rather
+#: than adjectives: someone evaluating the platform needs to know which surface
+#: each credential opens, and "demo user 3" does not say that.
+DEMO_ACCOUNTS = [
+    {
+        "role": "citizen",
+        "label": "Citizen portal",
+        "email": "citizen@medmesh.in",
+        "password": "Citizen@2026",
+        "surface": "/",
+        "description": "Public bed and ICU search, Urdu/Tamil/English, no account needed to browse.",
+    },
+    {
+        "role": "hospital_admin",
+        "label": "Hospital operations",
+        "email": "admin@srmc.medmesh.in",
+        "password": "Hospital@2026",
+        "surface": "/dashboard",
+        "description": "SRMC's own counters, inbound ambulances, roster and connector status.",
+    },
+    {
+        "role": "dispatcher",
+        "label": "108 dispatch console",
+        "email": "dispatch@medmesh.in",
+        "password": "Dispatch@108",
+        "surface": "/console",
+        "description": "Incident intake, capability-aware shortlist, crew assignment and routing.",
+    },
+    {
+        "role": "driver",
+        "label": "Ambulance crew",
+        "email": "crew@medmesh.in",
+        "password": "Crew@108",
+        "surface": "/crew",
+        "description": "The crew's own trip: scene navigation, handover and offline resilience.",
+    },
+    {
+        "role": "gov_official",
+        "label": "District health office",
+        "email": "gov@medmesh.in",
+        "password": "District@2026",
+        "surface": "/analytics",
+        "description": "Scoped district analytics, SLA reporting and CSV export.",
+    },
+    {
+        "role": "platform_admin",
+        "label": "Platform administration",
+        "email": "admin@medmesh.in",
+        "password": "MedMesh@2026",
+        "surface": "/admin",
+        "description": "Statewide oversight, account provisioning, fleet and connector management.",
+    },
+]
 
 
 @router.get("/me")

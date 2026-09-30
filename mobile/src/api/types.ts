@@ -30,7 +30,27 @@ export interface SessionUser {
   district_id: number | null;
   district_name: string | null;
   scope: string | null;
+  /** True while the account is still on its administrator-issued first password. */
+  must_change_password?: boolean;
+  password_changed_at?: string | null;
   last_login_at: string | null;
+}
+
+/** A published pilot sign-in, served by `GET /auth/demo-accounts`. */
+export interface DemoAccount {
+  role: Role;
+  label: string;
+  email: string;
+  password: string;
+  surface: string;
+  description: string;
+}
+
+export interface DemoAccountsPayload {
+  demo_mode: boolean;
+  environment: string;
+  accounts: DemoAccount[];
+  note: string;
 }
 
 export interface TrustFactor {
@@ -125,7 +145,14 @@ export interface FacilityDetail extends Facility {
     accepts_emergency: boolean;
     duty_end: string | null;
   }[];
-  active_holds: {
+  /**
+   * Inbound cases holding capacity at this facility. Staff-scoped: the API
+   * omits the key entirely for the public rather than sending an empty array,
+   * so that "you are not cleared to see dispatch traffic" is distinguishable
+   * from "nothing is coming". Read it as optional or the public facility page
+   * dies on the first render.
+   */
+  active_holds?: {
     id: number;
     resource: string;
     expires_at: string;
@@ -231,8 +258,18 @@ export interface Incident {
   lat: number;
   lng: number;
   landmark: string;
+  /** Supporting place detail: the coordinate leads, this confirms it. */
+  taluk: string | null;
   district_id: number;
   district_name: string | null;
+  /**
+   * How the coordinate was obtained, and whether it can be trusted at face
+   * value. `district` means the recorded point is the district centre, not the
+   * caller's position -- the matching engine measured its drive times from
+   * there, so any screen that shows an ETA has to say so alongside it.
+   */
+  location_source: 'gps' | 'map' | 'manual' | 'district';
+  location_approximate: boolean;
   /** Structured scene assessment. No free-text clinical field exists. */
   scene: {
     patient_state: string;
@@ -248,11 +285,40 @@ export interface Incident {
     bystander_cpr: boolean;
   };
   requires: { icu: boolean; ventilator: boolean; blood: boolean; specialty: string | null };
-  status: string;
+  status: IncidentStatus;
+  status_label: string;
+  is_open: boolean;
+  patient_aboard: boolean;
   created_at: string;
+  /** One timestamp per stage of the trip, so "on scene" is distinguishable from
+   *  "loaded" from "moving" without inferring any of them from the others. */
   dispatched_at: string | null;
+  en_route_at: string | null;
   arrived_at: string | null;
+  scene_arrived_at: string | null;
+  patient_onboard_at: string | null;
+  departed_scene_at: string | null;
+  hospital_arrived_at: string | null;
+  handed_over_at: string | null;
+  /** Server-derived next moves for the crew, so the app and the API can never
+   *  disagree about where the trip is. */
+  next_actions?: { status: IncidentStatus; label: string; timestamp: string | null }[];
   elapsed_seconds: number;
+  /** Ids as well as the expanded objects: comparing "is this my facility"
+   *  should not require null-checking a nested object. */
+  assigned_hospital_id: number | null;
+  assigned_ambulance_id: number | null;
+  /**
+   * Facilities that have refused this patient, oldest first. A closed door is
+   * remembered so a re-route does not re-offer it -- the dispatcher can still
+   * override deliberately, with a reason.
+   */
+  declined_hospital_ids: number[];
+  /** True when a facility has refused and no replacement has been chosen yet. */
+  destination_withdrawn: boolean;
+  facility_acknowledged_at?: string | null;
+  facility_declined_at?: string | null;
+  facility_decline_reason?: string | null;
   assigned_hospital: {
     id: number;
     name: string;
@@ -284,10 +350,69 @@ export interface Ambulance {
   operator_type: string;
   operator_name: string;
   capability: string;
+  capabilities?: string[];
   capability_label: string;
+  capability_labels?: string[];
   status: string;
+  status_label?: string;
   lat: number;
   lng: number;
+  base_district_id?: number;
+  base_district_name?: string | null;
+  driver_user_id?: number | null;
+  driver?: { id: number; full_name: string; email: string; phone: string | null } | null;
+  crew_state?: 'linked' | 'unlinked';
+  updated_at?: string | null;
+}
+
+/**
+ * The ambulance trip lifecycle, in order.
+ *
+ * `arrived` is the deprecated spelling of `at_scene` and is never emitted. It
+ * survives in this union so that a payload cached on a device before the upgrade
+ * still type-checks; the server normalises it on the way in.
+ */
+export type IncidentStatus =
+  | 'open'
+  | 'dispatched'
+  | 'en_route'
+  | 'at_scene'
+  | 'patient_onboard'
+  | 'transporting'
+  | 'at_hospital'
+  | 'handed_over'
+  | 'closed'
+  | 'cancelled'
+  | 'arrived';
+
+/** The ordered spine, for progress indicators. */
+export const TRIP_STAGES: IncidentStatus[] = [
+  'dispatched',
+  'en_route',
+  'at_scene',
+  'patient_onboard',
+  'transporting',
+  'at_hospital',
+  'handed_over',
+];
+
+export const TRIP_TERMINAL: IncidentStatus[] = ['handed_over', 'closed', 'cancelled'];
+
+export interface AmbulanceDriverLink {
+  id: number;
+  full_name: string;
+  email: string;
+  phone: string | null;
+  district_id: number | null;
+  district_name: string | null;
+  linked_ambulance: { id: number; call_sign: string; status: string; base_district_id: number } | null;
+}
+
+export interface FleetDirectory {
+  count: number;
+  results: AmbulanceDriverLink[];
+  crewless_units: Ambulance[];
+  orphan_drivers: number;
 }
 
 export interface CrewAssignment {
@@ -317,7 +442,11 @@ export interface CrewAssignment {
     generated_at: string;
   } | null;
   alternatives: ShortlistCandidate[];
+  /** Present when there is nothing to show. `assignment` is null both when the
+   *  crew is simply idle and when the account has no vehicle linked; `action_required`
+   *  is what tells those apart, because only one of them resolves on its own. */
   message?: string;
+  action_required?: string;
 }
 
 export interface District {

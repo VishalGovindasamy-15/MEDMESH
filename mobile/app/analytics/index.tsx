@@ -4,6 +4,7 @@ import { Linking, Pressable, RefreshControl, ScrollView, StyleSheet, View } from
 
 import { api, ApiError, API_BASE } from '../../src/api/client';
 import type { AnalyticsOverview, DistrictRollup, PlatformHealth } from '../../src/api/types';
+import { downloadCsv } from '../../src/lib/download';
 import { dateTime, elapsed } from '../../src/lib/format';
 import { useAuth } from '../../src/state/AuthProvider';
 import { useLive } from '../../src/state/LiveProvider';
@@ -48,6 +49,7 @@ export default function AnalyticsScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
   const load = useCallback(
     async (silent = false) => {
@@ -131,6 +133,31 @@ export default function AnalyticsScreen() {
     );
   }
 
+  /**
+   * Download the jurisdiction's capacity window.
+   *
+   * Fetched with the token attached rather than opened as a bare URL. The old
+   * `window.open` produced a tab containing the API's 401 body for every
+   * signed-in official -- the export endpoint is role-gated, and a new tab
+   * carries no Authorization header.
+   */
+  const exportCapacity = async () => {
+    setBusy('export');
+    setError(null);
+    try {
+      const { filename } = await downloadCsv(
+        '/analytics/export/capacity.csv?hours=24',
+        'medmesh-capacity.csv',
+      );
+      setNotice(`Exported ${filename}.`);
+    } catch (e) {
+      setNotice(null);
+      setError(e instanceof ApiError ? e.message : 'Export failed — nothing was downloaded.');
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const state = overview.state;
   const chartWidth = isDesktop ? Math.min(880, width - 420) : width - 96;
   const sorted = overview.districts;
@@ -146,15 +173,8 @@ export default function AnalyticsScreen() {
             label="Export CSV"
             icon="download"
             size="sm"
-            onPress={() => {
-              if (typeof window !== 'undefined') {
-                // Through the preview proxy, so the browser never needs to reach
-                // the API origin directly.
-                window.open(`/api/v1/analytics/export/capacity.csv?hours=24`, '_blank');
-              } else {
-                Linking.openURL(`${API_BASE}/analytics/export/capacity.csv?hours=24`);
-              }
-            }}
+            loading={busy === 'export'}
+            onPress={exportCapacity}
           />
           <Button
             label={overview.surge ? 'Stand down surge' : 'Activate surge'}
@@ -174,6 +194,21 @@ export default function AnalyticsScreen() {
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => load()} />}
       >
         {error ? <Banner tone="critical" icon="alert" title="Some data unavailable" body={error} /> : null}
+
+        {/* Exports are the one action here with a side effect the operator
+            cannot see: the file lands in a downloads folder they are not
+            looking at. Naming it back to them is how they know it worked. */}
+        {notice ? (
+          <Banner
+            tone="info"
+            icon="download"
+            title="Export ready"
+            body={notice}
+            action={
+              <Button label="Dismiss" size="sm" variant="ghost" onPress={() => setNotice(null)} />
+            }
+          />
+        ) : null}
 
         {overview.surge ? (
           <Banner

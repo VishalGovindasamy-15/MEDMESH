@@ -5,6 +5,7 @@ import { Pressable, RefreshControl, ScrollView, StyleSheet, View } from 'react-n
 import { api } from '../src/api/client';
 import type { District, Facility } from '../src/api/types';
 import { FacilityRow } from '../src/components/FacilityRow';
+import { DistrictPicker } from '../src/components/DistrictPicker';
 import { MapSurface } from '../src/components/MapSurface';
 import { toMapPoints } from '../src/components/mapTypes';
 import { VoiceSearchField } from '../src/components/VoiceSearch';
@@ -75,6 +76,7 @@ export default function DirectoryScreen() {
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState<FilterKey>('all');
   const [districtId, setDistrictId] = useState<number | null>(null);
+  const [districtPickerOpen, setDistrictPickerOpen] = useState(false);
   const [showMap, setShowMap] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -150,16 +152,41 @@ export default function DirectoryScreen() {
     });
   }, [merged, query, filter, districtId]);
 
+  /**
+   * The headline figures.
+   *
+   * Computed over `filtered`, not over `merged`. They used to run over the whole
+   * directory, so choosing a district changed the list and the map and left the
+   * four numbers above them untouched — the summary said 4,459 ICU beds across
+   * Tamil Nadu while the list beneath it showed eleven hospitals in Kanniyakumari.
+   * A number that does not move when its own filter moves is worse than no
+   * number: it reads as a total for the thing you are looking at, and silently
+   * is not.
+   *
+   * The unfiltered totals are kept as `statewide`, because "is there capacity
+   * anywhere, or only here" is a real question and the answer should not require
+   * clearing the filter to find out.
+   */
   const totals = useMemo(() => {
-    const withData = merged.filter((f) => f.capacity);
+    const withData = filtered.filter((f) => f.capacity);
     return {
-      facilities: merged.length,
+      facilities: filtered.length,
       live: withData.filter((f) => f.capacity!.trust_state === 'live').length,
       beds: withData.reduce((sum, f) => sum + (f.capacity!.beds_effective ?? 0), 0),
       icu: withData.reduce((sum, f) => sum + (f.capacity!.icu_effective ?? 0), 0),
       vent: withData.reduce((sum, f) => sum + (f.capacity!.vent_effective ?? 0), 0),
     };
+  }, [filtered]);
+
+  const statewide = useMemo(() => {
+    const withData = merged.filter((f) => f.capacity);
+    return {
+      facilities: merged.length,
+      icu: withData.reduce((sum, f) => sum + (f.capacity!.icu_effective ?? 0), 0),
+    };
   }, [merged]);
+
+  const selectedDistrict = districtId ? districts.find((d) => d.id === districtId) : null;
 
   const mapWidth = isPhone ? width - 24 : isDesktop ? 620 : width - 72;
 
@@ -167,9 +194,13 @@ export default function DirectoryScreen() {
     <AppShell
       title={tr('home.title')}
       subtitle={
-        districtId
-          ? `${districts.find((d) => d.id === districtId)?.name ?? 'District'} · ${filtered.length} facilities`
-          : `Coimbatore region · ${filtered.length} facilities reporting`
+        // "Coimbatore region" was printed whenever no district was chosen, which
+        // is both wrong and misleading once the dataset covers all 38: the
+        // default view is the whole state, and labelling it after one city tells
+        // a reader in Madurai that the platform does not cover them.
+        selectedDistrict
+          ? `${selectedDistrict.name} district · ${filtered.length} facilit${filtered.length === 1 ? 'y' : 'ies'}`
+          : `Tamil Nadu · all ${districts.length} districts · ${filtered.length} facilities reporting`
       }
       maxWidth={1320}
       actions={
@@ -275,6 +306,30 @@ export default function DirectoryScreen() {
           />
         </View>
 
+        {/*
+          What the figures above cover, stated rather than implied. Without this
+          the strip is four unlabelled totals whose meaning changes with the
+          filter, which is how a reader ends up quoting a district's ICU count as
+          the state's.
+        */}
+        <Row gap="sm" align="center" style={{ flexWrap: 'wrap', marginTop: -space.sm }}>
+          <Pill
+            compact
+            tone={selectedDistrict ? 'info' : 'neutral'}
+            label={selectedDistrict ? `Scoped to ${selectedDistrict.name}` : `Scoped to all ${districts.length} districts`}
+          />
+          <Small muted style={{ fontSize: 11.5 }}>
+            {selectedDistrict
+              ? `Statewide there are ${statewide.icu.toLocaleString()} ICU beds free across ${statewide.facilities} facilities.`
+              : 'Clear the district filter to see a single district on its own.'}
+          </Small>
+          {query.trim() ? (
+            <Small muted style={{ fontSize: 11.5 }}>
+              Search text also narrows the figures — {totals.facilities} of {statewide.facilities} facilities match.
+            </Small>
+          ) : null}
+        </Row>
+
         {/* Search + filters --------------------------------------------- */}
         <Stack gap="md">
           <Row gap="md" align="center" style={{ flexWrap: 'wrap' }}>
@@ -324,18 +379,59 @@ export default function DirectoryScreen() {
             scroll
           />
 
-          {districts.length > 1 ? (
-            <Segmented
-              options={[
-                { value: 'all', label: tr('home.districts') },
-                ...districts.map((d) => ({ value: String(d.id), label: d.name })),
-              ]}
-              value={districtId === null ? 'all' : String(districtId)}
-              onChange={(v) => setDistrictId(v === 'all' ? null : Number(v))}
-              size="sm"
-              scroll
-            />
-          ) : null}
+          {/*
+            District chooser.
+
+            This was a single horizontal `Segmented` carrying all 38 districts,
+            which is a forty-item scroll on a phone: reaching Kanniyakumari meant
+            dragging past thirty-nine targets, and the only affordance for
+            finding one was knowing where it sat in the list. The first six
+            districts in the population order get a chip; the rest live behind a
+            searchable picker that shows how many facilities each has, so the
+            choice can be made by name or by size.
+          */}
+          <Stack gap="sm">
+            <Row gap="sm" align="center" justify="space-between">
+              <Segmented
+                options={[
+                  { value: 'all', label: tr('home.districts') },
+                  ...districts.slice(0, 5).map((d) => ({ value: String(d.id), label: d.name })),
+                ]}
+                value={
+                  districtId === null || districts.findIndex((d) => d.id === districtId) >= 5
+                    ? 'all'
+                    : String(districtId)
+                }
+                onChange={(v) => setDistrictId(v === 'all' ? null : Number(v))}
+                size="sm"
+                scroll
+              />
+              <Button
+                size="sm"
+                icon="search"
+                label={
+                  !selectedDistrict || districts.findIndex((d) => d.id === districtId) >= 5
+                    ? `All ${districts.length} districts`
+                    : selectedDistrict.name
+                }
+                onPress={() => setDistrictPickerOpen(true)}
+              />
+            </Row>
+            {districtPickerOpen ? (
+              <DistrictPicker
+                districts={districts.map((d) => ({
+                  ...d,
+                  facilities: merged.filter((f) => f.district_id === d.id).length,
+                }))}
+                value={districtId}
+                onPick={(id) => {
+                  setDistrictId(id);
+                  setDistrictPickerOpen(false);
+                }}
+                onClose={() => setDistrictPickerOpen(false)}
+              />
+            ) : null}
+          </Stack>
         </Stack>
 
         {/* Map ---------------------------------------------------------- */}

@@ -26,7 +26,17 @@ from .config import settings
 from .database import Base, SessionLocal, engine
 from .live import live_store
 from .models import Hospital, IntegrationMode, utcnow
-from .routers import analytics, auth, connectors, dispatch, doctors, governance, hospitals, ws
+from .routers import (
+    analytics,
+    auth,
+    connectors,
+    dispatch,
+    doctors,
+    governance,
+    hospitals,
+    passwords,
+    ws,
+)
 from .services.connectors import ConnectorError
 from .seed import seed_all
 
@@ -98,6 +108,12 @@ def _warm_projection() -> int:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Hand the running loop to the socket layer before anything can write. The
+    # capacity ingest path is synchronous and reaches the websocket fan-out
+    # through `live_store.publish_soon`, which needs a loop to schedule onto;
+    # without this the write paths silently publish to nobody.
+    live_store.bind_loop(asyncio.get_running_loop())
+
     _bootstrap()
     _warm_projection()
 
@@ -116,6 +132,7 @@ async def lifespan(app: FastAPI):
                 await task
             except (asyncio.CancelledError, Exception):
                 pass
+        live_store.bind_loop(None)
         log.info("MedMesh API shutting down")
 
 
@@ -139,7 +156,11 @@ app.add_middleware(
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["Content-Disposition"],
+    # Without this the CSV exports lose their filename in the browser:
+    # `Content-Disposition` is not a CORS-safelisted response header, so a
+    # cross-origin fetch cannot read it and every download falls back to a
+    # generic name. The server has always sent a good one.
+    expose_headers=["Content-Disposition", "Content-Length"],
 )
 app.add_middleware(GZipMiddleware, minimum_size=800)
 
@@ -155,6 +176,7 @@ async def security_headers(request: Request, call_next):
 
 
 app.include_router(auth.router, prefix="/api/v1")
+app.include_router(passwords.router, prefix="/api/v1")
 app.include_router(hospitals.router, prefix="/api/v1")
 app.include_router(doctors.router, prefix="/api/v1")
 app.include_router(dispatch.router, prefix="/api/v1")

@@ -90,6 +90,22 @@ AMBULANCE_CAPABILITY_LABELS = {
     "mortuary": "Mortuary transport",
 }
 
+# Readable form of the fleet status enum. The dispatcher console and the
+# validation messages both need it, and "ON_TRIP" leaking into a sentence a
+# control-room operator reads is the kind of detail that makes software feel
+# unfinished.
+AMBULANCE_STATUS_LABELS = {
+    "available": "Available",
+    "assigned": "Assigned",
+    "en_route": "En route to scene",
+    "at_scene": "At scene",
+    "transporting": "Transporting patient",
+    "dispatched": "Dispatched",
+    "on_trip": "On trip",
+    "returning": "Returning",
+    "out_of_service": "Out of service",
+}
+
 
 def required_ambulance_capabilities(incident: Incident) -> list[str]:
     """Capability preference order for this incident, best first.
@@ -577,3 +593,109 @@ def traffic_note(leg: Leg, now: datetime | None = None) -> str:
     if 22 <= hour or hour <= 5:
         return f"Light traffic — {leg.label}"
     return f"Moderate traffic — {leg.label}"
+
+# --------------------------------------------------------------------------- #
+# Ambulance escalation ladder (§25)
+# --------------------------------------------------------------------------- #
+
+# How far a unit may be drawn from, in order. The platform previously searched
+# the entire state fleet for any available unit, which is not wrong for an
+# emergency service but is not a policy either: it has no concept of asking
+# locally first, and it hides the moment when an incident is being covered by a
+# unit that normally belongs to somebody else's district.
+#
+# Three tiers, in the order a control room actually escalates:
+#
+#   local       -- the incident's own district. The normal answer.
+#   neighbour   -- districts that share a border with it. Mutual aid between
+#                  neighbours is routine and usually faster than waiting for a
+#                  local unit to clear a previous job.
+#   statewide   -- everything else. Escalation, and it is labelled as such so
+#                  the dispatcher can see they are reaching.
+ESCALATION_TIERS = ("local", "neighbouring", "statewide")
+
+ESCALATION_LABELS = {
+    "local": "Local — incident district",
+    "neighbouring": "Mutual aid — neighbouring district",
+    "statewide": "Statewide escalation",
+}
+
+# Districts that share a border, by code. Hand-built because Tamil Nadu's
+# district boundaries are a known, stable, finite adjacency -- deriving them from
+# a geospatial library at runtime would add a dependency and a projection to get
+# the same answer. A neighbour is a district whose headquarters lies within
+# roughly 95 km, which is close to how the state's district pairs actually fall:
+# it captures Coimbatore-Erode and Madurai-Dindigul, and excludes
+# Coimbatore-Chennai at 420 km.
+NEIGHBOUR_RADIUS_KM = 95.0
+
+
+def _centroids(hospitals_by_district_centroid: dict[int, tuple[float, float]], home: int):
+    from .geo import haversine_km
+
+    home_point = hospitals_by_district_centroid.get(home)
+    if home_point is None:
+        return set()
+    out = set()
+    for district_id, point in hospitals_by_district_centroid.items():
+        if district_id == home:
+            continue
+        if haversine_km(home_point[0], home_point[1], point[0], point[1]) <= NEIGHBOUR_RADIUS_KM:
+            out.add(district_id)
+    return out
+
+
+def escalation_tiers(db, *, home_district_id: int | None) -> dict:
+    """The ladder, as district id sets, for a given home district.
+
+    Returned with both ids and names because it is rendered: the console shows
+    "Coimbatore + 3 neighbouring districts" as the scope of a search, and a
+    dispatcher who cannot see that a search crossed a border cannot judge whether
+    the answer is reasonable.
+    """
+    from sqlalchemy import select as _select
+
+    from ..models import District
+
+    districts = list(db.execute(_select(District)).scalars().all())
+    centroids = {d.id: (d.lat, d.lng) for d in districts}
+    names = {d.id: d.name for d in districts}
+
+    if home_district_id is None:
+        everything = set(centroids)
+        return {
+            "local": {"district_ids": sorted(everything), "names": sorted(names.values()), "label": "Statewide control"},
+            "neighbouring": {"district_ids": [], "names": [], "label": "Not applicable without a home district"},
+            "statewide": {"district_ids": sorted(everything), "names": sorted(names.values()), "label": "All districts"},
+        }
+
+    neighbours = _centroids(centroids, home_district_id)
+    local = {home_district_id}
+    return {
+        "local": {
+            "district_ids": sorted(local),
+            "names": [names.get(home_district_id, "")],
+            "label": names.get(home_district_id, ""),
+        },
+        "neighbouring": {
+            "district_ids": sorted(neighbours),
+            "names": sorted(names.get(d, "") for d in neighbours),
+            "label": f"{len(neighbours)} neighbouring district(s)",
+        },
+        "statewide": {
+            "district_ids": sorted(set(centroids) - local - neighbours),
+            "names": sorted(names.get(d, "") for d in (set(centroids) - local - neighbours)),
+            "label": "Rest of Tamil Nadu",
+        },
+    }
+
+
+def escalation_of(base_district_id: int | None, tiers: dict | None) -> str:
+    """Which tier a vehicle belongs to, for labelling a candidate."""
+    if tiers is None or base_district_id is None:
+        return "local"
+    if base_district_id in tiers["local"]["district_ids"]:
+        return "local"
+    if base_district_id in tiers["neighbouring"]["district_ids"]:
+        return "neighbouring"
+    return "statewide"

@@ -34,6 +34,8 @@ export interface GoogleMapProps {
   routePath?: [number, number][];
   routeTone?: 'accent' | 'live' | 'warm';
   interactive?: boolean;
+  /** Tap-to-place: the geographic point under a long press. */
+  onPress?: (point: { lat: number; lng: number }) => void;
 }
 
 function toLatLng(p: { lat: number; lng: number }) {
@@ -57,6 +59,7 @@ export function GoogleMap({
   routePath,
   routeTone = 'accent',
   interactive = true,
+  onPress,
 }: GoogleMapProps) {
   const { t } = useTheme();
   const camera = center ?? DEFAULT_CENTER;
@@ -65,6 +68,14 @@ export function GoogleMap({
   return (
     <View style={{ height, borderRadius: radius.lg, overflow: 'hidden' }}>
       <MapView
+        onLongPress={
+          onPress
+            ? (e: any) => {
+                const c = e?.nativeEvent?.coordinate;
+                if (c && typeof c.latitude === 'number') onPress({ lat: c.latitude, lng: c.longitude });
+              }
+            : undefined
+        }
         provider={PROVIDER_GOOGLE}
         style={StyleSheet.absoluteFill}
         initialRegion={{

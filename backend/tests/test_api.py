@@ -151,6 +151,21 @@ def test_dispatch_flow_creates_hold_and_alerts_hospital():
         assert detail["holds"].get("icu", 0) >= 1
         assert detail["capacity"]["icu_effective"] == detail["capacity"]["icu_available"] - detail["holds"]["icu"]
 
+        # ...but the *identity* of the inbound case is not public. A bed hold
+        # names an incident reference, an urgency, a call sign and an ETA, which
+        # together say that a specific emergency is on its way to a specific
+        # hospital. The aggregate count above stays visible because it is
+        # already folded into the published availability; the operational detail
+        # does not.
+        assert "active_holds" not in detail, "the public facility view must not expose inbound dispatch traffic"
+
+        # The receiving facility's own staff do see it -- that is the whole point
+        # of the data existing.
+        ward = _login(c, "admin@kgch.medmesh.in", "Hospital@2026")
+        own_hospital_id = c.get(f"{API}/auth/me", headers=ward).json()["hospital_id"]
+        mine = c.get(f"{API}/hospitals/{own_hospital_id}", headers=ward).json()
+        assert "active_holds" in mine
+
         # Lifecycle
         st = c.post(f"{API}/incidents/{incident['id']}/status", headers=dispatcher, json={"status": "en_route"})
         assert st.status_code == 200
@@ -162,8 +177,9 @@ def test_dispatch_flow_creates_hold_and_alerts_hospital():
         # seeded dataset happened to leave that facility alone -- the moment the
         # pilot data contained a realistic in-flight case, the test failed for a
         # reason that had nothing to do with the behaviour under test.
-        detail = c.get(f"{API}/hospitals/{top['hospital_id']}").json()
-        assert incident["id"] not in [h["incident_id"] for h in detail["active_holds"]], (
+        released = c.get(f"{API}/hospitals/{top['hospital_id']}", headers=dispatcher).json()
+        assert "active_holds" in released, "dispatch must be able to read inbound holds"
+        assert incident["id"] not in [h["incident_id"] for h in released["active_holds"]], (
             "handed-over incident must release its hold"
         )
 
@@ -311,8 +327,21 @@ def test_government_analytics_aggregates_without_pii():
         r = c.get(f"{API}/analytics/overview", headers=gov)
         assert r.status_code == 200
         body = r.json()
-        assert body["state"]["facilities"] > 20
+
+        # A district officer's view is their district. Asserting "> 20
+        # facilities" here, as this test used to, described the leak rather than
+        # the intent: the number was large because the response was statewide.
+        me = c.get(f"{API}/auth/me", headers=gov).json()
+        assert [d["district_id"] for d in body["districts"]] == [me["district_id"]]
+        assert body["state"]["facilities"] > 0
         assert body["districts"][0]["beds"]["occupancy_pct"] is not None
+
+        # The state directorate account keeps the statewide picture, so the
+        # scoping is a restriction on the district role and not a global cut.
+        state = _login(c, "admin@medmesh.in", "MedMesh@2026")
+        statewide = c.get(f"{API}/analytics/overview", headers=state).json()
+        assert len(statewide["districts"]) == 38
+        assert statewide["state"]["facilities"] > 100
 
         d = c.get(f"{API}/analytics/district/1", headers=gov)
         assert d.status_code == 200
@@ -1512,3 +1541,1807 @@ def test_statewide_matching_stays_within_budget():
         c.get(f"{API}/incidents/{incident_id}/shortlist", headers=dispatch)
         shortlist_ms = (time.perf_counter() - started) * 1000
         assert shortlist_ms < 500, f"shortlist rebuild took {shortlist_ms:.0f} ms"
+
+
+# --------------------------------------------------------------------------- #
+# Authorization regressions
+#
+# Every test below corresponds to a specific hole found in the end-to-end audit.
+# They are grouped here, rather than beside the feature each one protects,
+# because they share a shape: an action that was guarded by role alone, or by
+# nothing, when it needed to be guarded by jurisdiction or ownership.
+# --------------------------------------------------------------------------- #
+
+
+def _release_unit(c, dispatcher, ambulance_id: int) -> None:
+    """Close any live trip on a unit so it is available again."""
+    fleet = c.get(f"{API}/ambulances", headers=dispatcher).json()["results"]
+    unit = next((a for a in fleet if a["id"] == ambulance_id), None)
+    assert unit is not None, f"unit {ambulance_id} is not in the fleet view"
+    if unit["status"] == "available":
+        return
+
+    # Read the unit's own incident history rather than the queue: the queue is
+    # filtered and scoped, and a fixture that depends on a filtered list breaks
+    # whenever that filter is corrected -- which it just was.
+    detail = c.get(f"{API}/ambulances/{ambulance_id}", headers=dispatcher).json()
+    live = {"open", "dispatched", "en_route", "at_scene", "patient_onboard", "transporting", "at_hospital"}
+    for item in detail.get("recent_incidents", []):
+        if item["status"] not in live:
+            continue
+        for step in ("en_route", "at_scene", "patient_onboard", "at_hospital", "handed_over"):
+            response = c.post(
+                f"{API}/incidents/{item['id']}/status",
+                headers=dispatcher,
+                json={"status": step},
+            )
+            if response.status_code != 200:
+                continue
+            if response.json()["status"] in ("handed_over", "closed", "cancelled"):
+                break
+
+
+def _crew_vehicle(c, admin, crew_email: str = "crew@medmesh.in") -> dict:
+    """The vehicle the pilot crew account drives, with its id.
+
+    The authorization tests all need a real crew-to-vehicle link, and it has to
+    come from the API rather than from an assumption about the seeded ids --
+    otherwise the tests stop testing ownership the moment the seed changes.
+    """
+    directory = c.get(f"{API}/ambulances/drivers", headers=admin)
+    assert directory.status_code == 200, directory.text
+    for row in directory.json()["results"]:
+        if row["email"] == crew_email:
+            assert row["linked_ambulance"], (
+                f"{crew_email} is not linked to a vehicle, so the seed no longer "
+                "exercises the crew workflow"
+            )
+            return row["linked_ambulance"]
+    raise AssertionError(f"{crew_email} is not a driver account in this dataset")
+
+
+def _a_crew_incident(c, dispatcher, admin, *, ambulance_id: int | None = None, exclude: int | None = None) -> dict:
+    """A live incident, dispatched to a stated unit.
+
+    Deliberately a P2 bed hold rather than the P1 ICU case the main dispatch
+    test uses. Each call consumes real capacity for the length of the test
+    session, and demanding the last ICU bed in Coimbatore from two different
+    fixtures made these tests fail for a reason that has nothing to do with what
+    they assert -- which is the same trap the hold-release test documented
+    earlier. Beds are plentiful; the ownership and scope behaviour is identical.
+    """
+    created = c.post(
+        f"{API}/incidents",
+        headers=dispatcher,
+        json={
+            "category": "trauma_fall",
+            "urgency": "P2",
+            "lat": 11.0168,
+            "lng": 76.9558,
+            "landmark": "Ownership fixture",
+            "district_id": 1,
+        },
+    )
+    assert created.status_code == 201, created.text
+    incident = created.json()
+
+    if ambulance_id is not None:
+        # The suite shares one database, so an earlier test may have left this
+        # unit mid-trip. Close those trips first rather than asserting on a
+        # vehicle whose state depends on test ordering -- a fixture that only
+        # works when it runs first is a fixture that will break the next time
+        # somebody inserts a test above it.
+        _release_unit(c, dispatcher, ambulance_id)
+
+    eligible = [x for x in incident["shortlist"] if x["eligible"]]
+    assert eligible, "a Coimbatore incident must have a reachable facility"
+    top = eligible[0]
+
+    body: dict = {"hospital_id": top["hospital_id"], "hold_resource": "bed"}
+    if ambulance_id is not None:
+        body["ambulance_id"] = ambulance_id
+    elif exclude is not None:
+        # The engine would otherwise pick the nearest capable unit, which in
+        # Coimbatore is the one the crew test is already driving -- making the
+        # "not theirs" assertion below vacuously true.
+        fleet = c.get(f"{API}/ambulances", headers=dispatcher).json()["results"]
+        alternatives = [a for a in fleet if a["status"] == "available" and a["id"] != exclude]
+        assert alternatives, "no second available unit to dispatch"
+        body["ambulance_id"] = alternatives[0]["id"]
+    dispatched = c.post(f"{API}/incidents/{incident['id']}/dispatch", headers=dispatcher, json=body)
+    assert dispatched.status_code == 200, dispatched.text
+    # Kept on the incident so a caller can assert about the dispatch decision --
+    # which unit, which escalation tier, what the engine warned about -- without
+    # re-dispatching, which would fail because the incident is already live.
+    incident["dispatch"] = dispatched.json()
+    return incident
+
+
+def test_driver_cannot_act_on_an_incident_that_is_not_theirs():
+    """A crew action needs ownership, not just the driver role.
+
+    Incident ids are small integers and appear in the queue, in notifications
+    and in hold rows. Before this check, any driver account could advance *any*
+    incident it could name -- including marking a patient handed over and
+    diverting an ambulance -- and the actions are clinical, so the blast radius
+    was the whole state's caseload.
+    """
+    with client() as c:
+        admin = _login(c, "admin@medmesh.in", "MedMesh@2026")
+        dispatcher = _login(c, "dispatch@medmesh.in", "Dispatch@108")
+        crew = _login(c, "crew@medmesh.in", "Crew@108")
+        unit = _crew_vehicle(c, admin)
+
+        # Their own incident, dispatched to their own unit.
+        incident = _a_crew_incident(c, dispatcher, admin, ambulance_id=unit["id"])
+
+        own = c.get(f"{API}/crew/assignment", headers=crew)
+        assert own.status_code == 200, own.text
+        assignment = own.json()["assignment"]
+        assert assignment is not None, (
+            "the pilot crew account must be linked to a vehicle, otherwise the "
+            "next assertion proves nothing"
+        )
+        assert assignment["id"] == incident["id"]
+
+        # A second incident, on a different unit. The crew must not be able to
+        # touch it even knowing its id.
+        other = _a_crew_incident(c, dispatcher, admin, exclude=unit["id"])
+        assert other["dispatch"]["assigned_ambulance"]["id"] != unit["id"], (
+            "the fixture accidentally reused the crew's own vehicle, which would "
+            "make the refusal below meaningless"
+        )
+        assert other["id"] != incident["id"]
+        refused = c.post(
+            f"{API}/incidents/{other['id']}/status",
+            headers=crew,
+            json={"status": "en_route"},
+        )
+        assert refused.status_code == 404, (
+            f"a driver advanced an incident belonging to another unit: {refused.status_code} {refused.text}"
+        )
+
+        # And the reroute path, which moves the destination hospital.
+        rerouted = c.post(
+            f"{API}/incidents/{other['id']}/reroute",
+            headers=crew,
+            json={"hospital_id": other["shortlist"][0]["hospital_id"], "reason": "attempted hijack"},
+        )
+        assert rerouted.status_code == 404, (
+            f"a driver re-routed another unit's incident: {rerouted.status_code} {rerouted.text}"
+        )
+
+        # Their own incident still works, so the guard is scoped and not a
+        # blanket refusal.
+        allowed = c.post(
+            f"{API}/incidents/{incident['id']}/status",
+            headers=crew,
+            json={"status": "en_route"},
+        )
+        assert allowed.status_code == 200, allowed.text
+
+
+def test_crew_directory_does_not_invent_an_assignment():
+    """An unlinked driver must be told they are unlinked, not shown a stranger's job."""
+    with client() as c:
+        admin = _login(c, "admin@medmesh.in", "MedMesh@2026")
+        dispatcher = _login(c, "dispatch@medmesh.in", "Dispatch@108")
+        _a_crew_incident(c, dispatcher, admin)  # guarantees a live incident exists to be leaked
+
+        unlinked_email = "unlinked.crew@medmesh.in"
+        created = c.post(
+            f"{API}/governance/users",
+            headers=admin,
+            json={
+                "email": unlinked_email,
+                "full_name": "Unlinked Crew",
+                "password": "Unlinked@108",
+                "role": "driver",
+                "district_id": 1,
+            },
+        )
+        # Re-running the suite must not be defeated by the account from the
+        # previous run, so an existing one is reused rather than treated as an
+        # error. The test is about the account being unlinked, not about it
+        # being new.
+        if created.status_code == 409:
+            unlinked = _login(c, unlinked_email, "Unlinked@108")
+        else:
+            assert created.status_code == 201, created.text
+            unlinked = _login(c, unlinked_email, "Unlinked@108")
+
+        # Whatever previous state this account was in, it must not be driving
+        # anything -- otherwise the assertion below would pass for the wrong
+        # reason.
+        directory = c.get(f"{API}/ambulances/drivers", headers=admin).json()
+        for row in directory["results"]:
+            if row["email"] == unlinked_email and row["linked_ambulance"]:
+                released = c.post(
+                    f"{API}/ambulances/{row['linked_ambulance']['id']}/crew",
+                    headers=admin,
+                    json={"driver_user_id": None, "reason": "test setup"},
+                )
+                assert released.status_code == 200, released.text
+
+        response = c.get(f"{API}/crew/assignment", headers=unlinked)
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["assignment"] is None, (
+            "a driver with no vehicle was handed an assignment; this is the "
+            "fallback that showed strangers' emergencies"
+        )
+        assert body["ambulance"] is None
+        assert "link" in body["action_required"].lower()
+
+
+def test_incidents_are_scoped_to_the_readers_jurisdiction():
+    """Reading an incident is an operation: it carries a scene and a destination."""
+    with client() as c:
+        admin = _login(c, "admin@medmesh.in", "MedMesh@2026")
+        dispatcher = _login(c, "dispatch@medmesh.in", "Dispatch@108")
+        incident = _a_crew_incident(c, dispatcher, admin)
+
+        # The district officer for that district may read it.
+        gov = _login(c, "gov@medmesh.in", "District@2026")
+        gov_district = c.get(f"{API}/auth/me", headers=gov).json()["district_id"]
+        owner_view = c.get(f"{API}/incidents/{incident['id']}", headers=gov)
+        if incident["district_id"] == gov_district:
+            assert owner_view.status_code == 200
+        else:
+            assert owner_view.status_code == 404, (
+                "an incident outside the officer's district must not be readable"
+            )
+
+        # A citizen is not an operational role at all.
+        anon = c.get(f"{API}/incidents/{incident['id']}")
+        assert anon.status_code in (401, 403, 404)
+
+
+def test_fleet_list_is_not_readable_by_every_authenticated_account():
+    """The fleet list is a live map of every emergency vehicle in the state."""
+    with client() as c:
+        crew = _login(c, "crew@medmesh.in", "Crew@108")
+        mine = c.get(f"{API}/ambulances", headers=crew)
+        assert mine.status_code == 200, mine.text
+        assert mine.json()["count"] <= 1, "a driver must only see their own vehicle"
+
+        dispatcher = _login(c, "dispatch@medmesh.in", "Dispatch@108")
+        theirs = c.get(f"{API}/ambulances", headers=dispatcher)
+        assert theirs.status_code == 200
+        assert theirs.json()["count"] > 1, "dispatch needs the fleet"
+
+        anon = c.get(f"{API}/ambulances")
+        assert anon.status_code in (401, 403)
+
+
+def test_doctor_directory_opt_out_survives_a_direct_id_lookup():
+    """The opt-out is a property of the facility, not of the search endpoint."""
+    with client() as c:
+        admin = _login(c, "admin@medmesh.in", "MedMesh@2026")
+        # A private facility that has withheld its roster.
+        hospitals = c.get(f"{API}/hospitals?type=private&limit=200").json()["results"]
+        private = next((h for h in hospitals if not h.get("expose_doctor_directory", True)), None)
+        if private is None:
+            for h in hospitals:
+                toggle = c.patch(
+                    f"{API}/hospitals/{h['id']}",
+                    headers=admin,
+                    json={"expose_doctor_directory": False},
+                )
+                if toggle.status_code == 200:
+                    private = c.get(f"{API}/hospitals/{h['id']}").json()
+                    break
+        assert private is not None, "no private facility available to test the opt-out"
+
+        roster = c.get(f"{API}/doctors?hospital_id={private['id']}&limit=5").json()
+        assert roster["count"] == 0, "the directory itself must hide an opted-out roster"
+
+        doctors = c.get(f"{API}/doctors?limit=5&hospital_id={private['id']}").json()
+        assert doctors["count"] == 0
+
+        # The direct lookup must hide it too. Find an id by asking as staff.
+        staff = c.get(f"{API}/doctors?hospital_id={private['id']}&limit=5", headers=admin).json()
+        if staff["count"]:
+            doctor_id = staff["results"][0]["id"]
+            public_view = c.get(f"{API}/doctors/{doctor_id}")
+            assert public_view.status_code == 404, (
+                "a direct doctor id defeated the facility's directory opt-out"
+            )
+
+
+def test_gov_analytics_respect_the_officers_district():
+    """A district officer's overview must be their district, not the state."""
+    with client() as c:
+        gov = _login(c, "gov@medmesh.in", "District@2026")
+        me = c.get(f"{API}/auth/me", headers=gov).json()
+        payload = c.get(f"{API}/analytics/overview", headers=gov).json()
+
+        if me["district_id"] is not None:
+            assert len(payload["districts"]) == 1, (
+                "a district officer was served the statewide rollup"
+            )
+            assert payload["districts"][0]["district_id"] == me["district_id"]
+
+        admin = _login(c, "admin@medmesh.in", "MedMesh@2026")
+        statewide = c.get(f"{API}/analytics/overview", headers=admin).json()
+        assert len(statewide["districts"]) == 38
+
+
+def test_manual_ambulance_assignment_is_validated_like_the_engines_choice():
+    """Naming a unit by hand must not be the least-checked path in the system."""
+    with client() as c:
+        admin = _login(c, "admin@medmesh.in", "MedMesh@2026")
+        dispatcher = _login(c, "dispatch@medmesh.in", "Dispatch@108")
+        incident = _a_crew_incident(c, dispatcher, admin)
+
+        fleet = c.get(f"{API}/ambulances", headers=dispatcher).json()["results"]
+        busy = next((a for a in fleet if a["status"] != "available"), None)
+        if busy is not None:
+            forced = c.post(
+                f"{API}/incidents/{incident['id']}/dispatch",
+                headers=dispatcher,
+                json={"hospital_id": incident["shortlist"][0]["hospital_id"], "ambulance_id": busy["id"]},
+            )
+            assert forced.status_code == 409, (
+                f"a unit that is not free was accepted by hand: {forced.status_code}"
+            )
+            detail = forced.json()["detail"]
+            assert detail["blockers"], "the refusal must say what is wrong"
+
+            # With a stated reason it is permitted, because the override is meant
+            # to be accountable rather than impossible.
+            overridden = c.post(
+                f"{API}/incidents/{incident['id']}/dispatch",
+                headers=dispatcher,
+                json={
+                    "hospital_id": incident["shortlist"][0]["hospital_id"],
+                    "ambulance_id": busy["id"],
+                    "override_reason": "unit is clearing the previous job; control room accepts the wait",
+                },
+            )
+            assert overridden.status_code == 200, overridden.text
+            crew_match = overridden.json()["crew_notes"]
+            assert crew_match["manual"] is True
+            assert crew_match["escalation"] in ("local", "neighbouring", "statewide")
+
+
+def test_ambulance_selection_escalates_outward_but_reports_it():
+    """Local first, then mutual aid, then statewide -- and labelled."""
+    with client() as c:
+        admin = _login(c, "admin@medmesh.in", "MedMesh@2026")
+        dispatcher = _login(c, "dispatch@medmesh.in", "Dispatch@108")
+        incident = _a_crew_incident(c, dispatcher, admin)
+        crew_match = incident["dispatch"]["crew_notes"]
+
+        tier = crew_match["escalation"]
+        assert tier in ("local", "neighbouring", "statewide"), (
+            "the assignment must state which tier it came from"
+        )
+
+        # The tier must be the *best available* one, not merely a plausible one.
+        # Asserting a hard "local", as an earlier version of this test did, only
+        # held while the suite ran in a particular order -- by the time it
+        # executed, every Coimbatore unit was already committed to an earlier
+        # fixture, so statewide was the correct answer and the test was wrong.
+        # What actually matters is the search order, so that is what is checked:
+        # count the capable units that were free in each tier at dispatch time
+        # and require the engine to have used the innermost one with any supply.
+        fleet = c.get(f"{API}/ambulances", headers=dispatcher).json()
+        allowed_local = set(fleet["scope"]["tiers"]["local"]["district_ids"])
+        assigned_id = incident["dispatch"]["assigned_ambulance"]["id"]
+
+        # Supply is counted for the capability that was actually dispatched, not
+        # for anything on the incident's preference list. The engine is allowed
+        # to pass over a local basic-life-support van to reach an advanced one
+        # further out -- capability outranks distance, by design -- so counting
+        # any-capable supply would report that as a search-order failure when it
+        # is the intended behaviour.
+        dispatched_capability = crew_match["capability"]
+        local_supply = [
+            a
+            for a in fleet["results"]
+            if a["status"] == "available"
+            and dispatched_capability in a["capabilities"]
+            and a["base_district_id"] in allowed_local
+            and a["id"] != assigned_id
+        ]
+        if local_supply:
+            assert tier == "local", (
+                f"{len(local_supply)} {dispatched_capability} unit(s) were free in the incident "
+                f"district, but the engine reached into {tier}: {crew_match['warnings']}"
+            )
+        else:
+            # No local supply, so escalation is the correct answer -- and it has
+            # to be announced rather than performed silently.
+            assert tier in ("neighbouring", "statewide")
+            assert any("aid" in w or "escalation" in w for w in crew_match["warnings"]), (
+                "reaching outside the district must be stated in the assignment warnings, "
+                f"got: {crew_match['warnings']}"
+            )
+
+
+def test_escalation_ladder_is_geographically_sane():
+    """Neighbours are neighbours, not "everything that is not local"."""
+    with client() as c:
+        dispatcher = _login(c, "dispatch@medmesh.in", "Dispatch@108")
+        fleet = c.get(f"{API}/ambulances", headers=dispatcher).json()
+        tiers = fleet["scope"]["tiers"]
+        assert tiers is not None
+        local = set(tiers["local"]["district_ids"])
+        neighbours = set(tiers["neighbouring"]["district_ids"])
+        rest = set(tiers["statewide"]["district_ids"])
+        assert not (local & neighbours), "a district cannot be both local and a neighbour"
+        assert local | neighbours | rest
+        assert len(neighbours) >= 2, "Coimbatore has neighbours"
+        assert len(neighbours) < 20, "neighbouring must not collapse into 'everywhere'"
+
+
+# --------------------------------------------------------------------------- #
+# Password and session lifecycle
+# --------------------------------------------------------------------------- #
+
+
+def test_demo_credentials_are_not_compiled_into_the_client():
+    """The published pilot accounts come from the API, gated by a server flag.
+
+    The sign-in screen used to contain them as string literals, so every build
+    of the app -- pilot, staging, production -- shipped a working platform
+    administrator password in its JavaScript bundle. Moving them behind a flag
+    does not make them secret; it makes it possible for a deployment to *not*
+    have them, and puts the decision somewhere a deployment can actually make it.
+    """
+    with client() as c:
+        response = c.get(f"{API}/auth/demo-accounts")
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert "accounts" in body, "the endpoint must always answer, flag or not"
+        for account in body["accounts"]:
+            assert {"role", "email", "password", "surface"} <= set(account), (
+                "a published credential needs to say which surface it opens"
+            )
+        if not body["demo_mode"]:
+            assert body["accounts"] == [], "credentials must not leak when demo mode is off"
+
+
+def test_forced_first_login_change_is_enforced_before_credentials_are_issued():
+    """An unrotated one-time password may not provision other accounts."""
+    with client() as c:
+        admin = _login(c, "admin@medmesh.in", "MedMesh@2026")
+
+        state = c.get(f"{API}/auth/session", headers=admin)
+        assert state.status_code == 200, state.text
+        flag = state.json()["must_change_password"]
+
+        attempt = c.post(
+            f"{API}/governance/users",
+            headers=admin,
+            json={
+                "email": "rotation.probe@medmesh.in",
+                "full_name": "Rotation Probe",
+                "password": "Rotation@2026",
+                "role": "driver",
+                "district_id": 1,
+            },
+        )
+        if flag:
+            assert attempt.status_code == 403, (
+                f"an account still on its one-time password provisioned another: {attempt.status_code}"
+            )
+            assert "one-time password" in attempt.json()["detail"]
+
+            # Clearing the flag — and proving the change was real — reopens it.
+            changed = c.post(
+                f"{API}/auth/password/change",
+                headers=admin,
+                json={"current_password": "MedMesh@2026", "new_password": "Rotated-Admin-2026!"},
+            )
+            assert changed.status_code == 200, changed.text
+            assert changed.json()["forced_change_cleared"] is True
+
+            again = c.post(
+                f"{API}/governance/users",
+                headers=admin,
+                json={
+                    "email": "rotation.probe@medmesh.in",
+                    "full_name": "Rotation Probe",
+                    "password": "Rotation@2026",
+                    "role": "driver",
+                    "district_id": 1,
+                },
+            )
+            assert again.status_code == 201, again.text
+
+            # Put the pilot credential back so the published demo account still
+            # works for whoever opens the app next.
+            restored = c.post(
+                f"{API}/auth/password/change",
+                headers=admin,
+                json={"current_password": "Rotated-Admin-2026!", "new_password": "MedMesh@2026"},
+            )
+            # `MedMesh@2026` is on the banned list on purpose, so this must fail:
+            # the point of the banned list is that a published credential cannot
+            # be reinstated by its holder.
+            assert restored.status_code == 422, (
+                "a published pilot password was accepted as a new password"
+            )
+        else:
+            assert attempt.status_code in (201, 409)
+
+
+def test_password_reset_round_trip_and_enumeration_resistance():
+    """Forgot/reset works, and the forgot step does not confirm which accounts exist."""
+    with client() as c:
+        account_email = "reset.probe@medmesh.in"
+        admin = _login(c, "admin@medmesh.in", "MedMesh@2026")
+        created = c.post(
+            f"{API}/governance/users",
+            headers=admin,
+            json={
+                "email": account_email,
+                "full_name": "Reset Probe",
+                "password": "Initial-Password-98",
+                "role": "driver",
+                "district_id": 1,
+            },
+        )
+        assert created.status_code in (201, 409), created.text
+
+        # Unknown address and known address answer identically. Any difference
+        # here is an account-enumeration oracle, and the account names on this
+        # platform are real hospitals and real districts.
+        unknown = c.post(f"{API}/auth/password/forgot", json={"email": "nobody@example.invalid"})
+        known = c.post(f"{API}/auth/password/forgot", json={"email": account_email})
+        assert unknown.status_code == known.status_code == 200
+        assert unknown.json()["message"] == known.json()["message"]
+
+        token = known.json().get("dev_token")
+        if token is None:
+            # No reset-token echo configured, so the round trip cannot be driven
+            # from here; the identical-response assertion above is the part that
+            # matters for this environment.
+            return
+
+        weak = c.post(f"{API}/auth/password/reset", json={"token": token, "new_password": "short"})
+        assert weak.status_code == 422, "the password policy must apply to resets too"
+
+        bad = c.post(
+            f"{API}/auth/password/reset",
+            json={"token": "not-a-real-token-value-at-all", "new_password": "Replacement-Pass-77"},
+        )
+        assert bad.status_code == 400
+        assert bad.json()["detail"] == "That reset link is invalid or has expired", (
+            "an invalid link and an expired one must be indistinguishable"
+        )
+
+        done = c.post(
+            f"{API}/auth/password/reset",
+            json={"token": token, "new_password": "Replacement-Pass-77"},
+        )
+        assert done.status_code == 200, done.text
+
+        # The token is single-use.
+        replay = c.post(
+            f"{API}/auth/password/reset",
+            json={"token": token, "new_password": "Another-Replacement-99"},
+        )
+        assert replay.status_code == 400, "a reset token was accepted twice"
+
+        # And the new credential is the one that works.
+        assert c.post(f"{API}/auth/login", json={"email": account_email, "password": "Replacement-Pass-77"}).status_code == 200
+        assert c.post(f"{API}/auth/login", json={"email": account_email, "password": "Initial-Password-98"}).status_code == 401
+
+
+def test_capacity_ingest_reaches_the_websocket_subscribers():
+    """A capacity write must fan out, not just update the database.
+
+    The projection was updated in memory and the database was committed, so
+    polling clients were correct -- but a hospital dashboard sitting open on a
+    ward terminal only learned about a change when some unrelated code path
+    happened to publish. This asserts the write path itself publishes, which is
+    the difference between a real-time directory and a snapshot that refreshes
+    whenever the user presses something.
+    """
+    with client() as c:
+        from app.live import live_store
+
+        admin = _login(c, "admin@kgch.medmesh.in", "Hospital@2026")
+        hospital_id = c.get(f"{API}/auth/me", headers=admin).json()["hospital_id"]
+
+        queue = live_store.subscribe()
+        try:
+            published: list[dict] = []
+            original = live_store._fan_out
+
+            def capture(event, payload):
+                published.append({"event": event, "payload": payload})
+                return original(event, payload)
+
+            live_store._fan_out = capture  # type: ignore[assignment]
+            try:
+                response = c.post(
+                    f"{API}/hospitals/{hospital_id}/capacity/quick",
+                    headers=admin,
+                    json={"deltas": {"beds_available": -1}},
+                )
+                assert response.status_code == 200, response.text
+            finally:
+                live_store._fan_out = original  # type: ignore[assignment]
+        finally:
+            live_store.unsubscribe(queue)
+
+        assert any(p["event"] == "capacity.updated" for p in published), (
+            "the ingest path committed without telling any connected surface"
+        )
+        update = next(p for p in published if p["event"] == "capacity.updated")
+        assert update["payload"]["hospital_id"] == hospital_id
+        assert update["payload"]["capacity"]["beds_available"] is not None
+
+
+def test_trip_lifecycle_requires_the_stages_in_order_and_stamps_each_one():
+    """The extended state machine, and the timestamps it exists to produce."""
+    with client() as c:
+        admin = _login(c, "admin@medmesh.in", "MedMesh@2026")
+        dispatcher = _login(c, "dispatch@medmesh.in", "Dispatch@108")
+        incident = _a_crew_incident(c, dispatcher, admin)
+
+        # Skipping a stage is refused, and the refusal explains the legal next
+        # moves rather than just rejecting.
+        skipped = c.post(
+            f"{API}/incidents/{incident['id']}/status",
+            headers=dispatcher,
+            json={"status": "transporting"},
+        )
+        assert skipped.status_code == 409, skipped.text
+        detail = skipped.json()["detail"]
+        assert detail["current"] == "dispatched"
+        assert "en_route" in detail["allowed"]
+        assert detail["allowed_labels"], "the refusal must be readable, not just a code list"
+
+        # The vocabulary the audit asked for, in order.
+        for step in ("en_route", "at_scene", "patient_onboard", "transporting", "at_hospital", "handed_over"):
+            response = c.post(
+                f"{API}/incidents/{incident['id']}/status",
+                headers=dispatcher,
+                json={"status": step},
+            )
+            assert response.status_code == 200, f"{step}: {response.text}"
+            assert response.json()["status"] == step
+
+        # Repeating a state is idempotent rather than an error: a device that
+        # retried after a dropped response is resending what already succeeded.
+        repeat = c.post(
+            f"{API}/incidents/{incident['id']}/status",
+            headers=dispatcher,
+            json={"status": "handed_over"},
+        )
+        assert repeat.status_code == 200, repeat.text
+
+        # Moving backwards is not.
+        backwards = c.post(
+            f"{API}/incidents/{incident['id']}/status",
+            headers=dispatcher,
+            json={"status": "at_scene"},
+        )
+        assert backwards.status_code == 409
+
+        # Every stage left a timestamp, which is what makes the analytics able to
+        # report the intervals separately instead of inferring four of them.
+        final = c.get(f"{API}/incidents/{incident['id']}", headers=dispatcher).json()
+        for field in (
+            "dispatched_at",
+            "en_route_at",
+            "scene_arrived_at",
+            "patient_onboard_at",
+            "departed_scene_at",
+            "hospital_arrived_at",
+            "handed_over_at",
+        ):
+            assert final.get(field), f"{field} was never stamped"
+
+
+def test_deprecated_arrived_spelling_still_works():
+    """Older clients send `arrived`; it means at_scene and must not start failing."""
+    with client() as c:
+        admin = _login(c, "admin@medmesh.in", "MedMesh@2026")
+        dispatcher = _login(c, "dispatch@medmesh.in", "Dispatch@108")
+        incident = _a_crew_incident(c, dispatcher, admin)
+
+        c.post(f"{API}/incidents/{incident['id']}/status", headers=dispatcher, json={"status": "en_route"})
+        legacy = c.post(
+            f"{API}/incidents/{incident['id']}/status",
+            headers=dispatcher,
+            json={"status": "arrived"},
+        )
+        assert legacy.status_code == 200, legacy.text
+        assert legacy.json()["status"] == "at_scene", (
+            "`arrived` is the deprecated spelling of at_scene and must normalise"
+        )
+
+
+def test_fleet_management_links_and_releases_a_crew():
+    """The administrative path the audit found missing entirely."""
+    with client() as c:
+        admin = _login(c, "admin@medmesh.in", "MedMesh@2026")
+
+        directory = c.get(f"{API}/ambulances/drivers", headers=admin).json()
+        assert "orphan_drivers" in directory, "the fleet screen must surface unlinked accounts"
+        assert "crewless_units" in directory, "and vehicles with no crew"
+
+        created = c.post(
+            f"{API}/ambulances",
+            headers=admin,
+            json={
+                "call_sign": "108-TNCBE-TEST",
+                "registration": "TN 99 ZZ 0001",
+                "operator_type": "108",
+                "operator_name": "Test Control Room",
+                "base_district_id": 1,
+                "capabilities": ["als"],
+            },
+        )
+        if created.status_code == 409:
+            units = c.get(f"{API}/ambulances", headers=admin).json()["results"]
+            unit = next(u for u in units if u["call_sign"] == "108-TNCBE-TEST")
+        else:
+            assert created.status_code == 201, created.text
+            unit = created.json()
+
+        assert unit["capabilities"] == ["als"], "capabilities round-trip as a list"
+        assert unit["capability_labels"], "and carry their human labels"
+
+        # A non-driver account must be refused: the role is what the crew screens
+        # authenticate against.
+        wrong_role = c.post(
+            f"{API}/ambulances/{unit['id']}/crew",
+            headers=admin,
+            json={"driver_user_id": 1},
+        )
+        assert wrong_role.status_code == 409
+        assert "not driver" in wrong_role.json()["detail"]
+
+        # Linking a real driver, then releasing them.
+        driver = next((r for r in directory["results"] if r["linked_ambulance"] is None), None)
+        if driver is not None:
+            linked = c.post(
+                f"{API}/ambulances/{unit['id']}/crew",
+                headers=admin,
+                json={"driver_user_id": driver["id"], "reason": "fleet test"},
+            )
+            assert linked.status_code == 200, linked.text
+            assert linked.json()["driver"]["id"] == driver["id"]
+            assert linked.json()["crew_state"] == "linked"
+
+            released = c.post(
+                f"{API}/ambulances/{unit['id']}/crew",
+                headers=admin,
+                json={"driver_user_id": None, "reason": "fleet test cleanup"},
+            )
+            assert released.status_code == 200
+            assert released.json()["driver"] is None
+
+        # Standing a unit down, and the refusal to do it mid-trip.
+        down = c.post(
+            f"{API}/ambulances/{unit['id']}/status",
+            headers=admin,
+            json={"status": "out_of_service", "reason": "workshop"},
+        )
+        assert down.status_code == 200, down.text
+        assert down.json()["status"] == "out_of_service"
+
+        back = c.post(
+            f"{API}/ambulances/{unit['id']}/status",
+            headers=admin,
+            json={"status": "available"},
+        )
+        assert back.status_code == 200
+        assert back.json()["status"] == "available"
+
+        # A driver account may not manage the fleet at all.
+        crew = _login(c, "crew@medmesh.in", "Crew@108")
+        refused = c.post(
+            f"{API}/ambulances/{unit['id']}/status",
+            headers=crew,
+            json={"status": "out_of_service"},
+        )
+        assert refused.status_code == 403
+
+
+def test_roster_crud_and_specialty_validation():
+    """The roster is editable, and specialty is a closed list.
+
+    The audit's finding was that the platform could mark a clinician on duty and
+    could not add, correct or remove one -- so every clinician arrived through the
+    seeder. Worse, specialty was free text, and specialty is the *first* step of
+    the matching chain: a cardiologist recorded as "Heart" is indistinguishable
+    from a facility with no cardiologist at all.
+    """
+    with client() as c:
+        admin = _login(c, "admin@kgch.medmesh.in", "Hospital@2026")
+        hospital_id = c.get(f"{API}/auth/me", headers=admin).json()["hospital_id"]
+
+        created = c.post(
+            f"{API}/doctors",
+            headers=admin,
+            json={
+                "hospital_id": hospital_id,
+                "full_name": "Roster Probe",
+                "specialty": "cardiology",
+                "designation": "Consultant Cardiologist",
+                "shift_window": "08:00 – 20:00",
+                "on_duty": True,
+                "accepts_emergency": True,
+            },
+        )
+        if created.status_code == 409:
+            roster = c.get(f"{API}/doctors?hospital_id={hospital_id}&limit=200", headers=admin).json()
+            doctor = next(d for d in roster["results"] if d["full_name"] == "Roster Probe")
+        else:
+            assert created.status_code == 201, created.text
+            doctor = created.json()
+            # The response is renderable, not just an id: the roster screen shows
+            # the new row without a refetch.
+            assert doctor["specialty_label"]
+            assert doctor["shift_window"] == "08:00 – 20:00"
+
+        # Near-misses are normalised rather than creating invisible duplicates.
+        for near, canonical in (
+            ("Cardiology", "cardiology"),
+            ("orthopedics", "orthopaedics"),
+            ("ICU", "critical_care"),
+        ):
+            updated = c.patch(f"{API}/doctors/{doctor['id']}", headers=admin, json={"specialty": near})
+            assert updated.status_code == 200, updated.text
+            assert updated.json()["specialty"] == canonical, (
+                f"'{near}' should normalise to '{canonical}'"
+            )
+
+        # A genuinely different specialty is refused, with the options listed.
+        refused = c.patch(f"{API}/doctors/{doctor['id']}", headers=admin, json={"specialty": "heart"})
+        assert refused.status_code == 422, refused.text
+        detail = refused.json()["detail"]
+        assert detail["allowed"], "the refusal must list what is acceptable"
+        assert len(detail["allowed"]) == 19
+
+        # A partial edit touches only what it names.
+        before = c.get(f"{API}/doctors/{doctor['id']}", headers=admin).json()
+        edited = c.patch(f"{API}/doctors/{doctor['id']}", headers=admin, json={"designation": "Senior Consultant"})
+        assert edited.status_code == 200, edited.text
+        after = c.get(f"{API}/doctors/{doctor['id']}", headers=admin).json()
+        assert after["designation"] == "Senior Consultant"
+        assert after["specialty"] == before["specialty"], "an unnamed field was clobbered"
+        assert after["shift_window"] == before["shift_window"]
+
+        # Duty can now be set through the same endpoint as everything else.
+        off = c.patch(f"{API}/doctors/{doctor['id']}", headers=admin, json={"on_duty": False})
+        assert off.status_code == 200
+        assert off.json()["on_duty"] is False
+
+        # Removal.
+        removed = c.delete(f"{API}/doctors/{doctor['id']}", headers=admin)
+        assert removed.status_code == 204, removed.text
+        assert c.get(f"{API}/doctors/{doctor['id']}", headers=admin).status_code == 404
+
+        # A facility may not edit another facility's roster.
+        other = _login(c, "admin@srmc.medmesh.in", "Hospital@2026")
+        other_id = c.get(f"{API}/auth/me", headers=other).json()["hospital_id"]
+        assert other_id != hospital_id
+        cross = c.post(
+            f"{API}/doctors",
+            headers=other,
+            json={"hospital_id": hospital_id, "full_name": "Cross Tenant", "specialty": "cardiology"},
+        )
+        assert cross.status_code == 403, "one facility edited another's roster"
+
+
+# --------------------------------------------------------------------------- #
+# #23 — the incident coordinate is the caller's, and says where it came from
+# --------------------------------------------------------------------------- #
+
+
+def test_incident_location_is_the_callers_and_carries_its_provenance():
+    """The console used to send the district centre for every incident.
+
+    A call from Pollachi and a call from the middle of Coimbatore produced the
+    same pair of floats, and since the matching engine ranks facilities by drive
+    time *from that point*, both were answered with a plan for a journey nobody
+    was making. The coordinate is now captured at the console (GPS fix, map tap,
+    pasted coordinates, or an explicitly-labelled district fallback) and the
+    incident records which of those it was.
+    """
+    with client() as c:
+        dispatcher = _login(c, "dispatch@medmesh.in", "Dispatch@108")
+        base = {
+            "category": "road_accident",
+            "urgency": "P2",
+            "landmark": "Provenance probe",
+            "district_id": 1,
+        }
+
+        # A handset fix, well away from the district centre.
+        gps = c.post(
+            f"{API}/incidents",
+            headers=dispatcher,
+            json={**base, "lat": 10.9950, "lng": 76.9600, "location_source": "gps", "taluk": "Coimbatore South"},
+        )
+        assert gps.status_code == 201, gps.text
+        body = gps.json()
+        assert body["location_source"] == "gps"
+        assert body["taluk"] == "Coimbatore South"
+        assert body["location_approximate"] is False
+
+        # The documented fallback is still accepted, and is flagged as such.
+        fallback = c.post(
+            f"{API}/incidents",
+            headers=dispatcher,
+            json={**base, "lat": 11.0010, "lng": 76.9629, "location_source": "district"},
+        )
+        assert fallback.status_code == 201, fallback.text
+        assert fallback.json()["location_approximate"] is True, (
+            "a district-centre placeholder was recorded as a real fix"
+        )
+
+        # A transposed pair is the failure that actually happens, and it must not
+        # reach the matcher: 80.27, 13.08 is off the coast near Chennai's
+        # longitude but at Coimbatore's latitude.
+        swapped = c.post(f"{API}/incidents", headers=dispatcher, json={**base, "lat": 80.2707, "lng": 13.0827})
+        assert swapped.status_code == 422, "a coordinate outside Tamil Nadu was accepted"
+
+        outside = c.post(f"{API}/incidents", headers=dispatcher, json={**base, "lat": 13.0827, "lng": 86.9558})
+        assert outside.status_code == 422
+
+        # And the free-text field that was removed stays removed.
+        legacy = c.post(
+            f"{API}/incidents",
+            headers=dispatcher,
+            json={**base, "lat": 11.0, "lng": 76.9, "caller_notes": "Patient is Mr Suresh, 74"},
+        )
+        assert legacy.status_code == 422, "a free-text clinical field was accepted"
+
+
+def test_district_fallback_warning_survives_to_the_crew_screen():
+    """The crew has to know the destination may be approximate.
+
+    The driver is the person who has to find the scene. If the only coordinate
+    is a district centre, they need that on their own screen rather than having
+    to infer it from a suspiciously round number.
+    """
+    with client() as c:
+        dispatcher = _login(c, "dispatch@medmesh.in", "Dispatch@108")
+        created = c.post(
+            f"{API}/incidents",
+            headers=dispatcher,
+            json={
+                "category": "cardiac",
+                "urgency": "P1",
+                "landmark": "Approximate scene",
+                "district_id": 1,
+                "lat": 11.0010,
+                "lng": 76.9629,
+                "location_source": "district",
+            },
+        )
+        assert created.status_code == 201, created.text
+        incident_id = created.json()["id"]
+        eligible = [row for row in created.json()["shortlist"] if row.get("eligible")]
+        assert eligible, "no eligible facility for an approximate-location cardiac call"
+        # Sent to the pilot crew's own vehicle, so the assertion is about this
+        # incident rather than about whichever unit the engine happened to pick.
+        admin = _login(c, "admin@medmesh.in", "MedMesh@2026")
+        vehicle = _crew_vehicle(c, admin)
+        _release_unit(c, dispatcher, vehicle["id"])
+
+        dispatched = c.post(
+            f"{API}/incidents/{incident_id}/dispatch",
+            headers=dispatcher,
+            json={
+                "hospital_id": eligible[0]["hospital_id"],
+                "ambulance_id": vehicle["id"],
+                "override_reason": "test fixture: pinning the crew vehicle",
+            },
+        )
+        assert dispatched.status_code == 200, dispatched.text
+        assert dispatched.json()["location_approximate"] is True
+
+        crew = _login(c, "crew@medmesh.in", "Crew@108")
+        assignment = c.get(f"{API}/crew/assignment", headers=crew)
+        assert assignment.status_code == 200
+        payload = assignment.json()
+        assert payload["assignment"] is not None, "the crew did not receive the trip they were sent"
+        assert payload["assignment"]["id"] == incident_id
+        assert payload["assignment"]["location_approximate"] is True, (
+            "the crew screen has no way to know the scene coordinate is a placeholder"
+        )
+        _release_unit(c, dispatcher, vehicle["id"])
+
+
+# --------------------------------------------------------------------------- #
+# #15 — duty changes reach the public directory
+# --------------------------------------------------------------------------- #
+
+
+def test_duty_changes_are_announced_on_every_roster_path():
+    """`doctor.duty` was published by the toggle endpoint and nothing else.
+
+    Adding an on-duty consultant, correcting one through a roster edit, removing
+    one, and ending a shift on rollover all changed the answer to "is there a
+    cardiologist here right now" without the directory being told. The public
+    board is the one screen a citizen uses to decide where to take somebody, so
+    a stale answer there is the worst stale answer on the platform.
+
+    Asserted at the publisher rather than through a websocket client: the
+    contract is "this write path announces the change", and intercepting the
+    announcement tests exactly that without a socket in the way.
+    """
+    import app.routers.doctors as doctors_router
+    from app.live import live_store
+
+    announced: list[dict] = []
+
+    def record_sync(event, payload):
+        announced.append({"event": event, **payload})
+        return True
+
+    async def record_async(event, payload):
+        announced.append({"event": event, **payload})
+
+    original_soon = doctors_router._publish_duty
+    original_publish = live_store.publish
+
+    def capture(doctor, *, event="duty"):
+        announced.append(
+            {
+                "event": "doctor.duty",
+                "doctor_id": doctor.id,
+                "on_duty": doctor.on_duty,
+                "removed": event == "removed",
+            }
+        )
+        return True
+
+    async def capture_async(event, payload):
+        announced.append({"event": event, **payload})
+
+    doctors_router._publish_duty = capture
+    live_store.publish = capture_async
+    try:
+        with client() as c:
+            facility_admin = _login(c, "admin@srmc.medmesh.in", "Hospital@2026")
+            own_id = c.get(f"{API}/auth/me", headers=facility_admin).json()["hospital_id"]
+
+            # 1. Created while on duty.
+            created = c.post(
+                f"{API}/doctors",
+                headers=facility_admin,
+                json={
+                    "hospital_id": own_id,
+                    "full_name": "Dr. Duty Probe",
+                    "specialty": "cardiology",
+                    "registration_no": "TN-DUTY-0001",
+                    "on_duty": True,
+                },
+            )
+            assert created.status_code == 201, created.text
+            doctor_id = created.json()["id"]
+            assert [a["doctor_id"] for a in announced] == [doctor_id], (
+                "adding an on-duty clinician announced nothing"
+            )
+
+            # 2. Flipped off through the partial edit rather than the toggle.
+            announced.clear()
+            edited = c.patch(f"{API}/doctors/{doctor_id}", headers=facility_admin, json={"on_duty": False})
+            assert edited.status_code == 200, edited.text
+            assert [a["doctor_id"] for a in announced] == [doctor_id], (
+                "a roster edit changed duty silently"
+            )
+            assert announced[0]["on_duty"] is False
+
+            # 3. Back on through the dedicated toggle.
+            announced.clear()
+            toggled = c.post(f"{API}/doctors/{doctor_id}/duty", headers=facility_admin, json={"on_duty": True})
+            assert toggled.status_code == 200, toggled.text
+            assert [a["doctor_id"] for a in announced] == [doctor_id]
+
+            # 4. An edit that does not touch duty stays quiet. A directory that
+            #    re-renders on every designation change is a directory that
+            #    flickers for no reason.
+            announced.clear()
+            c.patch(f"{API}/doctors/{doctor_id}", headers=facility_admin, json={"designation": "Registrar"})
+            assert announced == [], "an unrelated edit announced a duty change"
+
+            # 5. Removed while on duty -- the case where the board would
+            #    otherwise keep showing somebody who no longer works there.
+            announced.clear()
+            removed = c.delete(f"{API}/doctors/{doctor_id}", headers=facility_admin)
+            assert removed.status_code == 204, removed.text
+            assert [a["doctor_id"] for a in announced] == [doctor_id], (
+                "removing an on-duty clinician left them on the public board"
+            )
+            assert announced[0]["removed"] is True
+    finally:
+        doctors_router._publish_duty = original_soon
+        live_store.publish = original_publish
+
+
+
+
+# --------------------------------------------------------------------------- #
+# #3/#4/#5 — a vehicle is a record, and a crew is linked to exactly one
+# --------------------------------------------------------------------------- #
+
+
+def test_fleet_management_creates_edits_crews_and_retires_a_vehicle():
+    """The whole ambulance lifecycle, through the API the console uses.
+
+    Before this there was no fleet management at all: `Ambulance.driver_id`
+    existed and the seeder filled it in, so the demo worked and a real unit
+    could not be onboarded without editing the database. A crew account created
+    through the account screen had no vehicle, and the crew app -- which is
+    built entirely around "my unit" -- had nothing to show.
+    """
+    import time as _time
+
+    tag = str(int(_time.time()))[-5:]
+
+    with client() as c:
+        admin = _login(c, "admin@medmesh.in", "MedMesh@2026")
+
+        # Create.
+        made = c.post(
+            f"{API}/ambulances",
+            headers=admin,
+            json={
+                "call_sign": f"108-TN37-C{tag}",
+                "registration": f"TN 37 ZC {tag}",
+                "operator_type": "108",
+                "operator_name": "108 Emergency Response",
+                "base_district_id": 1,
+                "capabilities": ["als", "nicu"],
+                "lat": 11.02,
+                "lng": 76.96,
+            },
+        )
+        assert made.status_code == 201, made.text
+        unit = made.json()
+        assert unit["capabilities"] == ["als", "nicu"]
+        assert unit["status"] == "available"
+
+        # Duplicate call signs are refused -- two units answering to the same
+        # name on the radio is a safety problem, not a data-entry nit.
+        clash = c.post(
+            f"{API}/ambulances",
+            headers=admin,
+            json={
+                "call_sign": f"108-TN37-C{tag}",
+                "registration": f"TN 37 ZD {tag}",
+                "operator_name": "108 Emergency Response",
+                "base_district_id": 1,
+                "capabilities": ["bls"],
+            },
+        )
+        assert clash.status_code == 409, "a duplicate call sign was accepted"
+
+        # Edit: re-base and re-fit.
+        edited = c.patch(
+            f"{API}/ambulances/{unit['id']}",
+            headers=admin,
+            json={"base_district_id": 2, "capabilities": ["bls"]},
+        )
+        assert edited.status_code == 200, edited.text
+        assert edited.json()["base_district_id"] == 2
+        assert edited.json()["capabilities"] == ["bls"]
+
+        # A crew account, and the link.
+        driver = c.post(
+            f"{API}/governance/users",
+            headers=admin,
+            json={
+                "full_name": "Fleet Probe",
+                "email": f"fleet.probe.{tag}@medmesh.in",
+                "password": "FleetProbe@2026",
+                "role": "driver",
+                "district_id": 1,
+            },
+        )
+        assert driver.status_code == 201, driver.text
+        driver_id = driver.json()["id"]
+
+        linked = c.post(
+            f"{API}/ambulances/{unit['id']}/crew",
+            headers=admin,
+            json={"driver_user_id": driver_id},
+        )
+        assert linked.status_code == 200, linked.text
+        assert linked.json()["driver"]["id"] == driver_id
+        assert linked.json()["crew_state"] == "linked"
+
+        # One driver, one active vehicle: linking them to a second unit must
+        # release the first, not leave two rows pointing at the same person.
+        second = c.post(
+            f"{API}/ambulances",
+            headers=admin,
+            json={
+                "call_sign": f"108-TN37-D{tag}",
+                "registration": f"TN 37 ZE {tag}",
+                "operator_name": "108 Emergency Response",
+                "base_district_id": 1,
+                "capabilities": ["bls"],
+            },
+        )
+        assert second.status_code == 201, second.text
+        moved = c.post(
+            f"{API}/ambulances/{second.json()['id']}/crew",
+            headers=admin,
+            json={"driver_user_id": driver_id},
+        )
+        assert moved.status_code == 200, moved.text
+        assert moved.json()["driver"]["id"] == driver_id
+
+        old = c.get(f"{API}/ambulances/{unit['id']}", headers=admin).json()
+        assert old["driver"] is None, "the previous vehicle still claims the same driver"
+
+        # And the crew's own screen follows them to the new unit.
+        crew_token = _login(c, f"fleet.probe.{tag}@medmesh.in", "FleetProbe@2026")
+        own = c.get(f"{API}/ambulances", headers=crew_token).json()
+        assert own["count"] == 1, "a driver can see more than their own vehicle"
+        assert own["results"][0]["id"] == second.json()["id"]
+
+        # Release, and the vehicle reports itself uncrewed.
+        released = c.post(
+            f"{API}/ambulances/{second.json()['id']}/crew",
+            headers=admin,
+            json={"driver_user_id": None, "reason": "end of shift"},
+        )
+        assert released.status_code == 200, released.text
+        assert released.json()["driver"] is None
+        assert released.json()["crew_state"] == "unlinked"
+
+        # Status changes are the two-state set the engine understands.
+        out = c.post(f"{API}/ambulances/{unit['id']}/status", headers=admin, json={"status": "out_of_service"})
+        assert out.status_code == 200
+        assert out.json()["status"] == "out_of_service"
+        back = c.post(f"{API}/ambulances/{unit['id']}/status", headers=admin, json={"status": "available"})
+        assert back.status_code == 200
+
+        bogus = c.post(f"{API}/ambulances/{unit['id']}/crew", headers=admin, json={"driver_user_id": 10**7})
+        assert bogus.status_code == 404, "a nonexistent driver account was linked"
+
+        # Leave the fleet as it was found.
+        for ident in (unit["id"], second.json()["id"]):
+            c.post(f"{API}/ambulances/{ident}/status", headers=admin, json={"status": "out_of_service"})
+
+
+def test_an_unlinked_driver_is_told_so_rather_than_given_a_trip():
+    """`GET /crew/assignment` must never invent an assignment.
+
+    The driver screen is built around "your current trip". A crew account with
+    no vehicle previously produced whichever payload fell out of a lookup that
+    assumed a link existed, which on a bad day means a driver being shown
+    somebody else's cardiac call as their own.
+    """
+    import time as _time
+
+    tag = str(int(_time.time()))[-5:]
+
+    with client() as c:
+        admin = _login(c, "admin@medmesh.in", "MedMesh@2026")
+        made = c.post(
+            f"{API}/governance/users",
+            headers=admin,
+            json={
+                "full_name": "Orphan Probe",
+                "email": f"orphan.probe.{tag}@medmesh.in",
+                "password": "OrphanProbe@2026",
+                "role": "driver",
+                "district_id": 1,
+            },
+        )
+        assert made.status_code == 201, made.text
+        token = _login(c, f"orphan.probe.{tag}@medmesh.in", "OrphanProbe@2026")
+
+        payload = c.get(f"{API}/crew/assignment", headers=token).json()
+        assert payload["ambulance"] is None
+        assert payload["assignment"] is None
+        assert payload.get("action_required"), "the driver is not told what to do about it"
+
+        # Reading the fleet as an unlinked driver is an empty list, not a 500.
+        fleet = c.get(f"{API}/ambulances", headers=token)
+        assert fleet.status_code == 200, fleet.text
+        assert fleet.json()["results"] == []
+
+
+def test_an_uncrewed_unit_is_ranked_below_a_crewed_one_in_the_same_district():
+    """Where there is a choice, the unit somebody is sitting in goes first.
+
+    Not a hard filter: a district with one uncrewed unit and nothing else free
+    is still better served by sending it than by refusing. But the engine now
+    knows the difference, which it did not when `driver_id` was a column nothing
+    read.
+    """
+    import time as _time
+
+    tag = str(int(_time.time()))[-5:]
+
+    with client() as c:
+        admin = _login(c, "admin@medmesh.in", "MedMesh@2026")
+        dispatcher = _login(c, "dispatch@medmesh.in", "Dispatch@108")
+        crew_vehicle = _crew_vehicle(c, admin)
+        _release_unit(c, dispatcher, crew_vehicle["id"])
+
+        near = c.post(
+            f"{API}/ambulances",
+            headers=admin,
+            json={
+                "call_sign": f"108-TN37-E{tag}",
+                "registration": f"TN 37 ZF {tag}",
+                "operator_name": "108 Emergency Response",
+                "base_district_id": 1,
+                "capabilities": ["bls"],
+                # Closer to the incident than the crewed unit, but empty.
+                "lat": 11.0168,
+                "lng": 76.9558,
+            },
+        )
+        assert near.status_code == 201, near.text
+
+        crewed = c.get(f"{API}/ambulances/{crew_vehicle['id']}", headers=admin).json()
+        c.patch(
+            f"{API}/ambulances/{crew_vehicle['id']}",
+            headers=admin,
+            json={"capabilities": ["bls"], "base_district_id": 1, "lat": 11.0600, "lng": 77.0000},
+        )
+
+        incident = c.post(
+            f"{API}/incidents",
+            headers=dispatcher,
+            json={
+                "category": "other",
+                "urgency": "P3",
+                "landmark": "Crewed ranking probe",
+                "district_id": 1,
+                "lat": 11.0200,
+                "lng": 76.9700,
+                "location_source": "map",
+            },
+        )
+        assert incident.status_code == 201, incident.text
+        eligible = [r for r in incident.json()["shortlist"] if r.get("eligible")]
+        assert eligible
+        sent = c.post(
+            f"{API}/incidents/{incident.json()['id']}/dispatch",
+            headers=dispatcher,
+            json={"hospital_id": eligible[0]["hospital_id"]},
+        )
+        assert sent.status_code == 200, sent.text
+        chosen = sent.json()["assigned_ambulance"]["id"]
+        assert chosen == crew_vehicle["id"], (
+            "an empty vehicle closer by was picked over a crewed one in the same district"
+        )
+        assert chosen != near.json()["id"]
+
+        _release_unit(c, dispatcher, chosen)
+        c.post(f"{API}/ambulances/{near.json()['id']}/status", headers=admin, json={"status": "out_of_service"})
+
+
+# --------------------------------------------------------------------------- #
+# #20 — the ward can answer, and a decline is remembered
+# --------------------------------------------------------------------------- #
+
+
+def _dispatch_to_first_eligible(c, dispatcher, *, urgency="P1", category="cardiac", landmark="Inbound probe"):
+    """Raise an incident and send it to the top eligible facility.
+
+    Returns (incident_id, hospital_id, dispatched_payload).
+    """
+    created = c.post(
+        f"{API}/incidents",
+        headers=dispatcher,
+        json={
+            "category": category,
+            "urgency": urgency,
+            "landmark": landmark,
+            "district_id": 1,
+            "lat": 11.0168,
+            "lng": 76.9558,
+            "location_source": "map",
+        },
+    )
+    assert created.status_code == 201, created.text
+    body = created.json()
+    eligible = [row for row in body["shortlist"] if row.get("eligible")]
+    assert eligible, "no eligible facility to dispatch to"
+    hospital_id = eligible[0]["hospital_id"]
+    sent = c.post(
+        f"{API}/incidents/{body['id']}/dispatch",
+        headers=dispatcher,
+        json={"hospital_id": hospital_id},
+    )
+    assert sent.status_code == 200, sent.text
+    return body["id"], hospital_id, sent.json()
+
+
+def _provision_ward(c, admin, hospital_id: int, *, tag: str = None) -> str:
+    """A facility account scoped to the receiving ward, ready to answer.
+
+    Provisioned rather than assumed: the pilot dataset has two hospital accounts
+    and the engine may legitimately pick any of 152 facilities, so a test that
+    used whichever account happened to exist would silently skip the ward path
+    it is supposed to be exercising. The platform admin can scope an account to
+    any facility, so the test does that and then signs in as the ward.
+    """
+    import time as _time
+
+    suffix = tag or str(int(_time.time()))[-6:]
+    email = f"ward.probe.{suffix}.{hospital_id}@medmesh.in"
+    made = c.post(
+        f"{API}/governance/users",
+        headers=admin,
+        json={
+            "full_name": "Ward Probe",
+            "email": email,
+            "password": "WardProbe@2026",
+            "role": "hospital_admin",
+            "hospital_id": hospital_id,
+        },
+    )
+    assert made.status_code == 201, made.text
+    return _login(c, email, "WardProbe@2026")
+
+
+def test_a_ward_can_confirm_and_the_dispatcher_is_told():
+    with client() as c:
+        dispatcher = _login(c, "dispatch@medmesh.in", "Dispatch@108")
+        admin = _login(c, "admin@medmesh.in", "MedMesh@2026")
+        incident_id, hospital_id, sent = _dispatch_to_first_eligible(c, dispatcher)
+        ward = _provision_ward(c, admin, hospital_id)
+
+        me = c.get(f"{API}/auth/me", headers=ward).json()
+        assert me["hospital_id"] == hospital_id, "the ward account is scoped to the wrong facility"
+
+        confirmed = c.post(
+            f"{API}/incidents/{incident_id}/facility-response",
+            headers=ward,
+            json={"response": "accepted", "note": "Bay 3 ready"},
+        )
+        assert confirmed.status_code == 200, confirmed.text
+        body = confirmed.json()
+        assert body["facility_response"] == "accepted"
+        assert body["facility_acknowledged_at"] is not None, (
+            "the ward confirmed but the acknowledgement was not recorded"
+        )
+        # Accepting is not a re-route: the destination must still be set, and the
+        # ward's own inbox must show the case as answered.
+        assert body["assigned_hospital_id"] == hospital_id
+        assert body["assigned_hospital"]["id"] == hospital_id
+
+        inbox = c.get(f"{API}/notifications?limit=50", headers=ward).json()
+        assert any(n["incident_id"] == incident_id for n in inbox["results"]), (
+            "the ward has no record of the case it just confirmed"
+        )
+
+        _release_unit(c, dispatcher, sent["assigned_ambulance"]["id"])
+
+
+def test_a_decline_withdraws_the_destination_and_shuts_that_door():
+    """The most important behaviour in the inbound loop.
+
+    A ward saying "not here" must not stand the incident down — the patient is
+    still in an ambulance — but it must clear the destination, so the crew stops
+    navigating to a facility that has refused them and the console re-offers the
+    case. Before this the destination stayed set, the shortlist kept proposing
+    the same facility, and a dispatcher re-routing a P1 had to remember which
+    doors were already closed.
+    """
+    with client() as c:
+        dispatcher = _login(c, "dispatch@medmesh.in", "Dispatch@108")
+        admin = _login(c, "admin@medmesh.in", "MedMesh@2026")
+        incident_id, hospital_id, sent = _dispatch_to_first_eligible(
+            c, dispatcher, urgency="P2", category="road_accident", landmark="Decline probe"
+        )
+        ward = _provision_ward(c, admin, hospital_id)
+
+        answered = c.post(
+            f"{API}/incidents/{incident_id}/facility-response",
+            headers=ward,
+            json={"response": "declined", "reason": "no_icu", "note": "unit closed for cleaning"},
+        )
+        assert answered.status_code == 200, answered.text
+        body = answered.json()
+
+        assert body["facility_decline_reason"] == "no_icu"
+        assert body["facility_declined_at"] is not None
+        assert body["assigned_hospital_id"] is None, "the destination survived a refusal"
+        assert body["assigned_hospital"] is None
+        assert body["destination_withdrawn"] is True
+        assert hospital_id in body["declined_hospital_ids"], "the refused facility was not remembered"
+        assert body["status"] != "cancelled", "a ward's refusal stood a live incident down"
+        assert body["status"] not in ("closed", "handed_over")
+
+        # The facility is gone from the shortlist handed back with the refusal.
+        assert all(
+            row["hospital_id"] != hospital_id for row in body["shortlist"]
+        ), "the facility that just declined is still offered"
+
+        # And it stays gone: the console re-reading the incident gets a fresh
+        # shortlist that still excludes it.
+        reread = c.get(f"{API}/incidents/{incident_id}", headers=dispatcher).json()
+        assert hospital_id in reread["declined_hospital_ids"]
+
+        # The dispatcher was told, because somebody has to pick a new
+        # destination and the crew is still driving.
+        operator = c.get(f"{API}/notifications?limit=50", headers=dispatcher).json()
+        assert any(
+            n["incident_id"] == incident_id and n["severity"] == "critical"
+            for n in operator["results"]
+        ), "a refusal did not reach the dispatcher who owns the incident"
+
+        _release_unit(c, dispatcher, sent["assigned_ambulance"]["id"])
+
+
+def test_answering_for_somebody_elses_ward_is_refused():
+    with client() as c:
+        dispatcher = _login(c, "dispatch@medmesh.in", "Dispatch@108")
+        admin = _login(c, "admin@medmesh.in", "MedMesh@2026")
+        incident_id, hospital_id, sent = _dispatch_to_first_eligible(
+            c, dispatcher, landmark="Wrong ward probe"
+        )
+
+        # Every hospital account that is not scoped to the receiving facility.
+        for email in ("admin@srmc.medmesh.in", "admin@kgch.medmesh.in"):
+            token = _login(c, email, "Hospital@2026")
+            me = c.get(f"{API}/auth/me", headers=token).json()
+            if me.get("hospital_id") == hospital_id:
+                continue
+            refused = c.post(
+                f"{API}/incidents/{incident_id}/facility-response",
+                headers=token,
+                json={"response": "accepted"},
+            )
+            assert refused.status_code in (403, 404), (
+                f"{email} answered for a facility it does not run: {refused.text}"
+            )
+
+        # A citizen certainly cannot.
+        citizen = _login(c, "citizen@medmesh.in", "Citizen@2026")
+        refused = c.post(
+            f"{API}/incidents/{incident_id}/facility-response",
+            headers=citizen,
+            json={"response": "accepted"},
+        )
+        assert refused.status_code == 403, refused.text
+
+        # Nor can a dispatcher outside the incident's district.
+        gov = _login(c, "gov@medmesh.in", "District@2026")
+        refused = c.post(
+            f"{API}/incidents/{incident_id}/facility-response",
+            headers=gov,
+            json={"response": "accepted"},
+        )
+        assert refused.status_code == 403, refused.text
+
+        _release_unit(c, dispatcher, sent["assigned_ambulance"]["id"])
+
+
+def test_a_decline_needs_a_reason():
+    """"Diversion" and "no ICU" tell the console very different things."""
+    with client() as c:
+        dispatcher = _login(c, "dispatch@medmesh.in", "Dispatch@108")
+        incident_id, hospital_id, sent = _dispatch_to_first_eligible(
+            c, dispatcher, urgency="P3", category="other", landmark="No-reason probe"
+        )
+        refused = c.post(
+            f"{API}/incidents/{incident_id}/facility-response",
+            headers=dispatcher,
+            json={"response": "declined"},
+        )
+        assert refused.status_code == 422, refused.text
+        _release_unit(c, dispatcher, sent["assigned_ambulance"]["id"])
+
+
+def test_a_dispatcher_can_record_a_refusal_taken_by_telephone():
+    """The answer often arrives on a phone, and somebody has to write it down.
+
+    A dispatcher may answer for a facility, but the difference has to survive:
+    the audit trail distinguishes a ward's own answer from one taken on its
+    behalf, because after an incident somebody asks who decided.
+    """
+    with client() as c:
+        dispatcher = _login(c, "dispatch@medmesh.in", "Dispatch@108")
+        admin = _login(c, "admin@medmesh.in", "MedMesh@2026")
+        incident_id, hospital_id, sent = _dispatch_to_first_eligible(
+            c, dispatcher, urgency="P2", category="stroke", landmark="Phone-in probe"
+        )
+
+        recorded = c.post(
+            f"{API}/incidents/{incident_id}/facility-response",
+            headers=dispatcher,
+            json={"response": "declined", "reason": "diversion", "note": "taken by phone at 14:20"},
+        )
+        assert recorded.status_code == 200, recorded.text
+        assert recorded.json()["facility_decline_reason"] == "diversion"
+
+        # Filtered server-side: the audit table is the busiest in the platform
+        # and a test that pulls the whole thing is a test that depends on what
+        # ran before it.
+        trail = c.get(
+            f"{API}/governance/audit?hours=1&limit=50&action=incident.facility_decline"
+            f"&entity_type=incident&entity_id={incident_id}",
+            headers=admin,
+        ).json()["results"]
+        entries = [e for e in trail if "decline" in e["action"]]
+        assert entries, "a refusal recorded by the control room left no audit entry"
+        assert any("control room" in e["summary"] for e in entries), (
+            "the audit trail does not distinguish an answer taken by phone from the ward's own: "
+            + str([e["summary"] for e in entries])
+        )
+
+        _release_unit(c, dispatcher, sent["assigned_ambulance"]["id"])
+
+
+def test_rerouting_back_to_a_facility_that_declined_needs_a_reason():
+    with client() as c:
+        dispatcher = _login(c, "dispatch@medmesh.in", "Dispatch@108")
+        incident_id, hospital_id, sent = _dispatch_to_first_eligible(
+            c, dispatcher, urgency="P2", category="road_accident", landmark="Re-offer probe"
+        )
+        declined = c.post(
+            f"{API}/incidents/{incident_id}/facility-response",
+            headers=dispatcher,
+            json={"response": "declined", "reason": "diversion"},
+        )
+        assert declined.status_code == 200, declined.text
+
+        again = c.post(
+            f"{API}/incidents/{incident_id}/reroute",
+            headers=dispatcher,
+            json={"hospital_id": hospital_id},
+        )
+        assert again.status_code == 409, "a facility that had refused was re-offered silently"
+        assert again.json()["detail"]["declined_hospital_ids"], again.text
+
+        override = c.post(
+            f"{API}/incidents/{incident_id}/reroute",
+            headers=dispatcher,
+            json={"hospital_id": hospital_id, "override_reason": "ward called back: bay free"},
+        )
+        assert override.status_code == 200, override.text
+        assert override.json()["assigned_hospital_id"] == hospital_id
+
+        _release_unit(c, dispatcher, sent["assigned_ambulance"]["id"])
+
+
+# --------------------------------------------------------------------------- #
+# Driver telemetry
+#
+# The position a crew reports is the only thing that moves a vehicle on the
+# console's map between status presses, so it is worth an assertion that it
+# travels the whole way: driver endpoint, stored on the unit, and read back by
+# the two views the control room actually uses.
+# --------------------------------------------------------------------------- #
+
+
+def test_a_crew_position_report_moves_the_unit_on_the_console_map():
+    with client() as c:
+        admin = _login(c, "admin@medmesh.in", "MedMesh@2026")
+        dispatcher = _login(c, "dispatch@medmesh.in", "Dispatch@108")
+        crew = _login(c, "crew@medmesh.in", "Crew@108")
+        unit = _crew_vehicle(c, admin)
+
+        # Somewhere on the Avinashi Road corridor, a plausible mid-transport fix
+        # rather than a coordinate copied from the unit's seeded position.
+        fix = {"lat": 11.0621, "lng": 77.0412}
+        r = c.post(f"{API}/crew/location", headers=crew, json=fix)
+        assert r.status_code == 200, r.text
+        assert r.json()["ok"] is True
+
+        # The unit's own record -- what the crew screen reads back.
+        own = c.get(f"{API}/ambulances/{unit['id']}", headers=dispatcher).json()
+        assert abs(own["lat"] - fix["lat"]) < 1e-6
+        assert abs(own["lng"] - fix["lng"]) < 1e-6
+
+        # And the fleet list behind the console map, so a console watching the
+        # board sees the same number rather than the seeded one.
+        fleet = c.get(f"{API}/ambulances", headers=dispatcher).json()["results"]
+        row = next(a for a in fleet if a["id"] == unit["id"])
+        assert abs(row["lat"] - fix["lat"]) < 1e-6
+        assert abs(row["lng"] - fix["lng"]) < 1e-6
+
+        # And the crew's own view -- the screen that prints the fix back as a
+        # GPS age -- reads it from the same place.
+        own_view = c.get(f"{API}/ambulances", headers=crew).json()["results"]
+        assert len(own_view) == 1, "a driver sees exactly one vehicle: their own"
+        assert abs(own_view[0]["lat"] - fix["lat"]) < 1e-6
+
+
+def test_telemetry_is_refused_to_everyone_but_the_crew():
+    with client() as c:
+        for email, password in (
+            ("citizen@medmesh.in", "Citizen@2026"),
+            ("admin@srmc.medmesh.in", "Hospital@2026"),
+            ("dispatch@medmesh.in", "Dispatch@108"),
+            ("gov@medmesh.in", "District@2026"),
+        ):
+            token = _login(c, email, password)
+            r = c.post(f"{API}/crew/location", headers=token, json={"lat": 11.0, "lng": 77.0})
+            assert r.status_code == 403, f"{email} could move a vehicle: {r.status_code}"
+
+        # An unauthenticated caller, too: this is a position feed for operational
+        # vehicles and must never be writable without a credential.
+        assert c.post(f"{API}/crew/location", json={"lat": 11.0, "lng": 77.0}).status_code == 401
+
+
+def test_a_position_fix_must_be_a_real_coordinate():
+    with client() as c:
+        crew = _login(c, "crew@medmesh.in", "Crew@108")
+        for bad in ({"lat": 95.0, "lng": 77.0}, {"lat": 11.0, "lng": 200.0}, {"lat": 11.0}):
+            r = c.post(f"{API}/crew/location", headers=crew, json=bad)
+            assert r.status_code == 422, f"accepted {bad} as a position: {r.status_code}"
+
+
+# --------------------------------------------------------------------------- #
+# Government analytics: the operational picture is not public
+# --------------------------------------------------------------------------- #
+
+
+def test_the_operations_overview_is_not_world_readable():
+    """The state header carries open incidents and live fleet strength.
+
+    It answered anonymous callers, so anyone on the internet could read how many
+    ambulances were free across Tamil Nadu and where the surge flag was up. The
+    public portal does not call this endpoint -- it reads the facility directory,
+    which says where care is available without saying where the fleet is.
+    """
+    with client() as c:
+        assert c.get(f"{API}/analytics/overview").status_code == 401
+
+        # Signed in but not entitled: the citizen has the directory, not this.
+        citizen = _login(c, "citizen@medmesh.in", "Citizen@2026")
+        assert c.get(f"{API}/analytics/overview", headers=citizen).status_code == 403
+
+        ward = _login(c, "admin@srmc.medmesh.in", "Hospital@2026")
+        assert c.get(f"{API}/analytics/overview", headers=ward).status_code == 403
+
+        gov = _login(c, "gov@medmesh.in", "District@2026")
+        body = c.get(f"{API}/analytics/overview", headers=gov).json()
+        assert "operations" in body and "districts" in body
+
+
+def test_the_sla_report_is_operations_only():
+    """Median dispatch latency is platform telemetry, not a public statistic."""
+    with client() as c:
+        assert c.get(f"{API}/analytics/sla?days=7").status_code == 401
+        citizen = _login(c, "citizen@medmesh.in", "Citizen@2026")
+        assert c.get(f"{API}/analytics/sla?days=7", headers=citizen).status_code == 403
+        gov = _login(c, "gov@medmesh.in", "District@2026")
+        assert c.get(f"{API}/analytics/sla?days=7", headers=gov).status_code == 200
+
+
+def test_the_incident_export_carries_the_officers_jurisdiction():
+    """Both exports are scoped, and the incident file is the one that was not.
+
+    A district officer downloading their own district's incidents received every
+    incident in the state, in a file, with nothing in the interface to suggest
+    the widening.
+    """
+    with client() as c:
+        gov = _login(c, "gov@medmesh.in", "District@2026")
+        me = c.get(f"{API}/auth/me", headers=gov).json()
+        mine = set()
+
+        export = c.get(f"{API}/analytics/export/incidents.csv?days=365", headers=gov)
+        assert export.status_code == 200, export.text
+        assert export.headers["content-type"].startswith("text/csv")
+
+        lines = [l for l in export.text.splitlines() if l.strip()]
+        header = lines[0].split(",")
+        district_col = header.index("district_id")
+        mine = {int(l.split(",")[district_col]) for l in lines[1:]}
+        assert mine, "the export returned no rows, so it proves nothing either way"
+        if me["district_id"] is not None:
+            assert mine == {me["district_id"]}, (
+                f"a district officer exported {len(mine)} districts"
+            )
+
+        # The state directorate still gets the state, because that is the role.
+        admin = _login(c, "admin@medmesh.in", "MedMesh@2026")
+        wide = c.get(f"{API}/analytics/export/incidents.csv?days=365", headers=admin)
+        assert wide.status_code == 200

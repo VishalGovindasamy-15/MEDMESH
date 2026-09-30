@@ -41,6 +41,14 @@ export interface MapSurfaceProps {
   interactive?: boolean;
   /** Hides the "how to read this" strip where the screen already explains it. */
   showLegend?: boolean;
+  /**
+   * Tap-to-place. Only meaningful with a fixed `center`+`zoom`: the schematic
+   * canvas auto-fits to its own points, so a tap on it has no geographic
+   * meaning. When a handler is supplied and Maps is unavailable, the canvas
+   * switches to a fixed projection around `center` so that a tap still lands
+   * somewhere real.
+   */
+  onPress?: (point: { lat: number; lng: number }) => void;
 }
 
 export function MapSurface(props: MapSurfaceProps) {
@@ -60,6 +68,7 @@ export function MapSurface(props: MapSurfaceProps) {
     interactive = true,
     showLegend = true,
   } = props;
+  const onPress = props.onPress;
 
   const google = hasGoogleMaps();
 
@@ -107,6 +116,7 @@ export function MapSurface(props: MapSurfaceProps) {
           originLabel={originLabel}
           routePath={routePath}
           interactive={interactive}
+          onPress={onPress}
         />
       ) : (
         <MapCanvas
@@ -119,6 +129,9 @@ export function MapSurface(props: MapSurfaceProps) {
           originLabel={originLabel}
           showLabels={showLabels}
           route={corridor}
+          center={onPress ? (center ?? null) : null}
+          zoom={onPress ? (zoom ?? null) : null}
+          onPress={onPress}
         />
       )}
 

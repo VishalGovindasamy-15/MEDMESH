@@ -229,7 +229,21 @@ export default function IncidentWorkspace() {
     );
   }
 
-  const isDispatched = ['dispatched', 'en_route', 'arrived'].includes(incident.status);
+  // The trip is "committed" from dispatch until the patient is handed over or
+  // the call ends. This list was left at the three states the old model had, so
+  // once the lifecycle gained AT_SCENE / PATIENT_ONBOARD / TRANSPORTING /
+  // AT_HOSPITAL the destination panel and the holds simply stopped rendering
+  // partway through every journey -- the console lost sight of a case exactly
+  // when it was most in motion.
+  const isDispatched = [
+    'dispatched',
+    'en_route',
+    'at_scene',
+    'patient_onboard',
+    'transporting',
+    'at_hospital',
+    'arrived',
+  ].includes(incident.status);
   const isFinished = ['handed_over', 'closed', 'cancelled'].includes(incident.status);
   const elapsedNow = incident.elapsed_seconds + tick * 20;
 
@@ -252,6 +266,43 @@ export default function IncidentWorkspace() {
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => load()} />}
       >
         {error ? <Banner tone="critical" icon="alert" title="Action failed" body={error} /> : null}
+
+        {/* The scene coordinate, and whether it can be trusted. A district-centre
+            fallback is a legitimate answer to a call from a landline -- but the
+            dispatcher is choosing a facility by drive time *from this point*,
+            and the crew is driving to it, so the approximation has to be stated
+            rather than buried in a coordinate that looks precise. */}
+        {incident.location_approximate ? (
+          <Banner
+            tone="warm"
+            icon="pin"
+            title="Scene location is approximate"
+            body={
+              'Only the district centre is recorded for this call' +
+              (incident.taluk ? ` (${incident.taluk})` : '') +
+              '. Drive times are measured from there, so confirm the address with the caller before committing a unit.'
+            }
+          />
+        ) : null}
+
+        {incident.destination_withdrawn && !incident.assigned_hospital ? (
+          <Banner
+            tone="critical"
+            icon="alert"
+            title="Destination withdrawn — re-route needed"
+            body={
+              `${
+                incident.declined_hospital_ids.length > 1
+                  ? `${incident.declined_hospital_ids.length} facilities have`
+                  : 'The receiving facility has'
+              } declined this patient${
+                incident.facility_decline_reason
+                  ? ` (${incident.facility_decline_reason.replace(/_/g, ' ')})`
+                  : ''
+              }. The holds are released and the crew is still driving — pick a facility from the fresh shortlist below.`
+            }
+          />
+        ) : null}
 
         {blocked ? (
           <Banner
@@ -331,8 +382,15 @@ export default function IncidentWorkspace() {
                   <Label>Advance status</Label>
                   <Row gap="xs" wrap>
                     {[
+                      // The control room's shortcut row: one button per stage it
+                      // would ever set on a crew's behalf. The full ladder is
+                      // the crew's job; these are for reading a stage out loud
+                      // on a phone call.
                       { key: 'en_route', label: 'En route' },
-                      { key: 'arrived', label: 'On board' },
+                      { key: 'at_scene', label: 'At scene' },
+                      { key: 'patient_onboard', label: 'On board' },
+                      { key: 'transporting', label: 'Transporting' },
+                      { key: 'at_hospital', label: 'At hospital' },
                       { key: 'handed_over', label: 'Handed over' },
                     ].map((s) => (
                       <Button

@@ -79,6 +79,8 @@ export interface GoogleMapProps {
   /** Colour a route by day/night leg instead of the accent hue. */
   routeTone?: 'accent' | 'live' | 'warm';
   interactive?: boolean;
+  /** Tap-to-place. Receives the geographic point under the tap. */
+  onPress?: (point: { lat: number; lng: number }) => void;
 }
 
 export function GoogleMap({
@@ -93,6 +95,7 @@ export function GoogleMap({
   routePath,
   routeTone = 'accent',
   interactive = true,
+  onPress,
 }: GoogleMapProps) {
   const { t } = useTheme();
   const divRef = React.useRef<HTMLDivElement | null>(null);
@@ -102,14 +105,16 @@ export function GoogleMap({
   const [failed, setFailed] = React.useState(false);
   // Kept in a ref so the marker click handlers never close over a stale prop.
   const selectRef = React.useRef(onSelect);
+  const pressRef = React.useRef<((point: { lat: number; lng: number }) => void) | undefined>(undefined);
   selectRef.current = onSelect;
+  pressRef.current = onPress;
 
   React.useEffect(() => {
     let cancelled = false;
     loadMapsApi()
       .then(() => {
         if (cancelled || !divRef.current || !window.google?.maps) return;
-        mapRef.current = new window.google.maps.Map(divRef.current, {
+        const map = new window.google.maps.Map(divRef.current, {
           center: center ?? DEFAULT_CENTER,
           zoom,
           disableDefaultUI: !interactive,
@@ -121,6 +126,15 @@ export function GoogleMap({
           gestureHandling: interactive ? 'auto' : 'none',
           // Keeps the basemap quiet so state colour reads as data, not decoration.
           styles: QUIET_BASEMAP,
+        });
+        mapRef.current = map;
+        // Tap-to-place. Registered once on the map rather than per-marker, so a
+        // tap anywhere — including on empty ground — reports a point. The
+        // location picker is the only consumer, and it needs the empty ground.
+        map.addListener('click', (event: google.maps.MapMouseEvent) => {
+          const handler = pressRef.current;
+          const position = event.latLng;
+          if (handler && position) handler({ lat: position.lat(), lng: position.lng() });
         });
         setFailed(false);
         renderMarkers();

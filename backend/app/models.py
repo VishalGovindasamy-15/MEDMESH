@@ -24,6 +24,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -78,14 +79,50 @@ class EdCongestion(str, enum.Enum):
     CRITICAL = "critical"
 
 
+class LocationSource(str, enum.Enum):
+    """How the incident coordinate was obtained.
+
+    Distinct from the coordinate itself because the two are not equally
+    trustworthy and the difference has to survive to the dispatcher's screen and
+    to any later review. A handset fix is accurate to tens of metres; a
+    district-centre fallback can be sixty kilometres out. Storing only a pair of
+    floats made those indistinguishable, which is how a call from Pollachi came
+    to be dispatched as though it had come from the middle of Coimbatore.
+    """
+
+    GPS = "gps"  # caller's handset reported a position
+    MAP = "map"  # operator placed the pin on the map during the call
+    MANUAL = "manual"  # operator resolved a spoken address to a point
+    DISTRICT = "district"  # district centre only -- approximate, flagged in the UI
+
+
 class IncidentStatus(str, enum.Enum):
+    """The trip's position in the ambulance lifecycle.
+
+    The previous vocabulary had five states for a seven-stage journey, and one of
+    them -- `arrived` -- meant "the crew is at the scene" in the backend while the
+    driver app's screen used the same word for "the patient is in the vehicle".
+    Two stages were therefore unrepresentable, and the ward's countdown started
+    against the wrong event.
+
+    `ARRIVED` is retained as a value because it exists in stored data and in
+    older client payloads, but it is never written by the current code: the
+    lifecycle normalises it to `AT_SCENE` on the way in. See
+    app/services/lifecycle.py for the transition table.
+    """
+
     OPEN = "open"
     DISPATCHED = "dispatched"
     EN_ROUTE = "en_route"
-    ARRIVED = "arrived"
+    AT_SCENE = "at_scene"
+    PATIENT_ONBOARD = "patient_onboard"
+    TRANSPORTING = "transporting"
+    AT_HOSPITAL = "at_hospital"
     HANDED_OVER = "handed_over"
     CLOSED = "closed"
     CANCELLED = "cancelled"
+
+    ARRIVED = "arrived"  # deprecated: read as AT_SCENE
 
 
 class IncidentCategory(str, enum.Enum):
@@ -223,6 +260,7 @@ class NotificationKind(str, enum.Enum):
     HOLD_EXPIRING = "hold_expiring"
     HOLD_RELEASED = "hold_released"
     STALENESS_REMINDER = "staleness_reminder"  # §6.2 nudge to update
+    AUTH_PASSWORD_RESET = "auth_password_reset"  # reset link issued
     SUBMISSION_QUARANTINED = "submission_quarantined"
     FEEDBACK_RAISED = "feedback_raised"
     VERIFICATION_DECIDED = "verification_decided"
@@ -352,7 +390,12 @@ class Doctor(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     hospital_id: Mapped[int] = mapped_column(ForeignKey("hospitals.id"), index=True)
     full_name: Mapped[str] = mapped_column(String(120))
-    registration_no: Mapped[str] = mapped_column(String(32))  # TNMC registration
+    # Nullable, because the field is not always to hand when a clinician is
+    # added: a bed-control clerk knows the name and the specialty and the
+    # registration number is in a filing cabinet. The directory does not publish
+    # it, so the cost of its absence is zero -- whereas requiring it meant the
+    # roster simply stayed empty.
+    registration_no: Mapped[str | None] = mapped_column(String(32))  # TNMC registration
     specialty: Mapped[str] = mapped_column(String(60), index=True)
     department: Mapped[str] = mapped_column(String(80))
     designation: Mapped[str] = mapped_column(String(60))
@@ -362,6 +405,12 @@ class Doctor(Base):
     # Shift pattern drives the automatic on-duty flip when a hospital does not
     # use roster integration.
     shift: Mapped[str] = mapped_column(String(16), default="morning")
+    #: Free-form override for the shift band. The shift enum is coarse (morning /
+    #: afternoon / night) and real rosters are not: "07:30 – 13:30" is a normal
+    #: way to describe a duty period, and forcing it into one of four buckets
+    #: loses information the ward clerk took the trouble to record. Null means
+    #: "use the bucket", so existing rows read unchanged.
+    shift_window: Mapped[str | None] = mapped_column(String(32))
     accepts_emergency: Mapped[bool] = mapped_column(Boolean, default=True)
     languages: Mapped[str] = mapped_column(String(80), default="Tamil, English")
     last_toggled_at: Mapped[datetime | None] = mapped_column(DateTime)
@@ -392,6 +441,25 @@ class Ambulance(Base):
     capabilities: Mapped[str] = mapped_column(String(80), default="bls")  # bls | als | nicu | mortuary
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
+    __table_args__ = (
+        # One driver, one active vehicle. A partial unique index rather than a
+        # plain one because most vehicles have no linked driver, and the rule is
+        # about *links*, not about rows: a null driver_id means "crew unassigned"
+        # and any number of vehicles may be in that state.
+        #
+        # This was previously only implied -- `ambulance_for_user` used
+        # `scalar_one_or_none`, which reads as if the invariant held but raises
+        # the moment it does not. Expressing it in the schema means the database
+        # refuses the bad state instead of the driver's screen discovering it.
+        Index(
+            "uq_ambulance_driver",
+            "driver_id",
+            unique=True,
+            sqlite_where=text("driver_id IS NOT NULL"),
+            postgresql_where=text("driver_id IS NOT NULL"),
+        ),
+    )
+
 
 class Incident(Base):
     """A dispatch request. Contains no patient identifiers by construction."""
@@ -410,6 +478,14 @@ class Incident(Base):
     # "Avinashi Road, opposite the bus depot" cannot be enumerated in advance.
     landmark: Mapped[str] = mapped_column(String(200))
     district_id: Mapped[int] = mapped_column(ForeignKey("districts.id"))
+    # Taluk and landmark are supporting information for the crew, which is what
+    # the intake design asks for: the coordinate leads, the words confirm it.
+    # Both name a place, never a person, so they fit the no-patient-data rule
+    # for the same reason `landmark` does.
+    taluk: Mapped[str | None] = mapped_column(String(80))
+    location_source: Mapped[LocationSource] = mapped_column(
+        enum_col(LocationSource), default=LocationSource.MAP
+    )
 
     # Structured scene assessment, replacing the previous `caller_notes` free
     # text column. See the enums above: every field is a closed set, so no
@@ -439,9 +515,39 @@ class Incident(Base):
 
     assigned_hospital_id: Mapped[int | None] = mapped_column(ForeignKey("hospitals.id"))
     assigned_ambulance_id: Mapped[int | None] = mapped_column(ForeignKey("ambulances.id"))
+    # One column per stage of the trip. The original schema had three
+    # timestamps for a seven-stage journey, which forced every analytics
+    # question to be answered by subtracting two numbers that each meant more
+    # than one thing: "arrival time" was reported as `arrived_at - created_at`
+    # and therefore included the dispatch delay, the drive to the scene and the
+    # on-scene time without ever separating them.
     dispatched_at: Mapped[datetime | None] = mapped_column(DateTime)
+    en_route_at: Mapped[datetime | None] = mapped_column(DateTime)
+    scene_arrived_at: Mapped[datetime | None] = mapped_column(DateTime)
+    patient_onboard_at: Mapped[datetime | None] = mapped_column(DateTime)
+    departed_scene_at: Mapped[datetime | None] = mapped_column(DateTime)
+    hospital_arrived_at: Mapped[datetime | None] = mapped_column(DateTime)
+    handed_over_at: Mapped[datetime | None] = mapped_column(DateTime)
+    # Legacy: scene arrival. Kept in step by lifecycle.apply_timestamps so that
+    # the SLA report and any stored export keep working, and so that a row
+    # written before this change still reads correctly.
     arrived_at: Mapped[datetime | None] = mapped_column(DateTime)
     closed_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+    # The receiving ward's answer. The inbound alert had no reply path, so a
+    # facility that could not take the patient had to telephone a control room
+    # that had nowhere to record the outcome -- the hold stayed until it expired
+    # and the next shortlist still showed the bed as free.
+    facility_acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime)
+    facility_declined_at: Mapped[datetime | None] = mapped_column(DateTime)
+    facility_decline_reason: Mapped[str | None] = mapped_column(String(32))
+
+    # Facilities that have refused this incident, oldest first, as a comma-joined
+    # id list. Kept because a decline has to be remembered across the shortlist
+    # rebuilds that follow it: the ward that just said "no ICU" is exactly the
+    # one the next shortlist would otherwise offer again, and a dispatcher
+    # re-routing a P1 should not have to remember which doors are already shut.
+    declined_hospital_ids: Mapped[str] = mapped_column(String(200), default="")
 
     # Ranked shortlist is snapshotted at dispatch time so we can later answer
     # "why was this hospital chosen instead of that one".
@@ -484,6 +590,19 @@ class User(Base):
     hospital_id: Mapped[int | None] = mapped_column(ForeignKey("hospitals.id"))
     district_id: Mapped[int | None] = mapped_column(ForeignKey("districts.id"))  # official jurisdiction
     amr_scope: Mapped[str | None] = mapped_column(String(40))  # state | district | facility
+
+    # Forced first-login rotation. An administrator mints the account and hands
+    # the password over out of band, so it is a one-time credential by
+    # construction; this flag is what makes the "one-time" part enforceable
+    # rather than advisory.
+    must_change_password: Mapped[bool] = mapped_column(Boolean, default=False)
+    password_changed_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+    # Password reset. Only the hash of the token is stored -- see
+    # app/services/audit.hash_secret -- so that a dump of this table does not
+    # contain working reset links.
+    reset_token_hash: Mapped[str | None] = mapped_column(String(64), index=True)
+    reset_expires_at: Mapped[datetime | None] = mapped_column(DateTime)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime)

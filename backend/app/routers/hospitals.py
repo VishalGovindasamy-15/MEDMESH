@@ -320,6 +320,34 @@ def hold_view(db: Session, hold, *, hospital: Hospital) -> dict:
     }
 
 
+def _can_see_operational(db: Session, user: User | None, hospital: Hospital) -> bool:
+    """Who may see dispatch traffic against a facility.
+
+    A bed hold is an operational fact, not a capacity fact. It names an incident
+    reference, an urgency, an inbound unit's call sign and its ETA -- which
+    together disclose that a specific emergency is heading to a specific
+    hospital right now. The public portal's contract is aggregate capacity, so
+    that traffic is staff-only: the receiving facility's own people, dispatch, a
+    scoped government analyst, and the platform team.
+
+    The aggregate `holds` count stays public because it is already folded into
+    the published availability -- a bed promised to an inbound ambulance is not
+    a free bed, and the citizen is entitled to the truthful number without being
+    told why it moved.
+    """
+    if user is None:
+        return False
+    if user.role in (UserRole.PLATFORM_ADMIN, UserRole.DISPATCHER):
+        return True
+    if user.role is UserRole.HOSPITAL_ADMIN:
+        return user.hospital_id == hospital.id
+    if user.role is UserRole.GOV_OFFICIAL:
+        # Jurisdiction, not facility: a district officer oversees every facility
+        # in their district, which is the scope the analytics matrix gives them.
+        return user.district_id is None or user.district_id == hospital.district_id
+    return False
+
+
 @router.get("/{hospital_id}")
 def hospital_detail(hospital_id: int, user: OptionalUser, db: Session = Depends(get_db), history_hours: int = 24):
     hospital = db.get(Hospital, hospital_id)
@@ -368,10 +396,19 @@ def hospital_detail(hospital_id: int, user: OptionalUser, db: Session = Depends(
         # case, how urgent, what is coming, and how long until the crew arrives.
         # The earlier shape was {"incident_id": 2}, which is unreadable to a
         # nurse and forced the dashboard to print a database id.
-        "active_holds": [
-            hold_view(db, h, hospital=hospital)
-            for h in active_holds(db, hospital_id=hospital.id)
-        ],
+        # Operational dispatch traffic. Present only for staff; absent, not
+        # empty, for the public, so a client cannot mistake "you are not allowed
+        # to know" for "nothing is inbound".
+        **(
+            {
+                "active_holds": [
+                    hold_view(db, h, hospital=hospital)
+                    for h in active_holds(db, hospital_id=hospital.id)
+                ]
+            }
+            if _can_see_operational(db, user, hospital)
+            else {}
+        ),
     }
 
 
@@ -544,6 +581,20 @@ def ingest_capacity(
         },
     )
     db.commit()
+
+    # Fan out to the websocket subscribers. This is the single choke point for
+    # every capacity write on the platform -- the API connector, the quick-adjust
+    # keypad, the full-form push and the simulator all come through here -- and
+    # it was the one thing the ingest path never did. The projection was updated
+    # in memory, so *polls* were correct, but a hospital dashboard sitting open
+    # on a ward terminal only learned about a change when something else
+    # happened to publish. Which is to say: the directory was real-time in the
+    # database and not in the user's browser.
+    #
+    # `publish_capacity_soon` rather than an `await` because this function is
+    # synchronous and shared with non-HTTP callers; see app/live.py.
+    live_store.publish_capacity_soon(hospital.id)
+
     return {"record": _record_view(record), "trust": verdict.to_wire(), "accepted": not verdict.quarantined}
 
 

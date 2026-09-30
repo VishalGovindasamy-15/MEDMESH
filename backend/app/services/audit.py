@@ -52,3 +52,18 @@ def diff(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
         if before.get(k) != v:
             out[k] = {"from": before.get(k), "to": v}
     return out
+
+
+def hash_secret(raw: str) -> str:
+    """One-way hash for bearer secrets that are stored at rest.
+
+    Used for password-reset tokens. They are 256 bits of `secrets.token_urlsafe`
+    entropy, so a fast hash is the right primitive here: brute force is not a
+    threat against a value nobody can guess, and the expensive KDF is reserved
+    for passwords, where a human's choice is the weak part. Hashing at all is
+    what matters -- a dump of the users table must not contain working reset
+    links.
+    """
+    import hashlib
+
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()

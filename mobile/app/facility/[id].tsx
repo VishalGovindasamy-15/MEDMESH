@@ -350,7 +350,7 @@ export default function FacilityScreen() {
               </KeyValue>
             </Card>
 
-            {detail.active_holds.length ? (
+            {detail.active_holds?.length ? (
               <Card style={{ gap: space.sm }} tone="info">
                 <Heading>Active holds</Heading>
                 {detail.active_holds.map((h) => (

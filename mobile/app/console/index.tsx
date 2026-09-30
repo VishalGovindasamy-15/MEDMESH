@@ -3,6 +3,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import { api, ApiError } from '../../src/api/client';
+import { LocationPicker, type IncidentLocation } from '../../src/components/LocationPicker';
 import type { Ambulance, District, Incident } from '../../src/api/types';
 import { categoryLabel, clockTime, elapsed, STATUS_LABELS } from '../../src/lib/format';
 import { useAuth } from '../../src/state/AuthProvider';
@@ -118,6 +119,8 @@ export default function ConsoleScreen() {
   const [category, setCategory] = useState('road_accident');
   const [landmark, setLandmark] = useState('');
   const [districtId, setDistrictId] = useState<string>('');
+  const [location, setLocation] = useState<IncidentLocation | null>(null);
+  const [taluk, setTaluk] = useState('');
   const [urgency, setUrgency] = useState<'P1' | 'P2' | 'P3'>('P1');
   // Structured scene assessment. Every field is a closed set drawn from the
   // server's enums, so nothing typed here can become a stored identifier. The
@@ -153,7 +156,15 @@ export default function ConsoleScreen() {
       if (amb.status === 'fulfilled') setFleet(amb.value.results);
       if (dist.status === 'fulfilled') {
         setDistricts(dist.value.results);
-        if (!districtId && dist.value.results.length) setDistrictId(String(dist.value.results[0].id));
+        // Default to the operator's own jurisdiction rather than to whatever
+        // happens to sort first. A Coimbatore dispatcher raising a Coimbatore
+        // call should not have to correct the district every time -- and getting
+        // it wrong is not a cosmetic error, it scopes the whole search.
+        if (!districtId && dist.value.results.length) {
+          const own = user?.district_id;
+          const match = own ? dist.value.results.find((d) => d.id === own) : null;
+          setDistrictId(String((match ?? dist.value.results[0]).id));
+        }
       }
 
       const failures = [incs, amb, dist].filter((r) => r.status === 'rejected') as PromiseRejectedResult[];
@@ -192,6 +203,23 @@ export default function ConsoleScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  /**
+   * District choices, jurisdiction first.
+   *
+   * A chip row of thirty-eight is unusable on a phone and the operator almost
+   * always wants one of a handful -- their own district, plus its neighbours for
+   * the cross-border calls that are routine at a border. The rest stay reachable
+   * because a control room does take calls outside its own area, and hiding them
+   * would force the wrong district to be picked instead.
+   */
+  const districtOptions = useMemo(() => {
+    const own = districts.filter((d) => d.id === user?.district_id);
+    const rest = districts
+      .filter((d) => d.id !== user?.district_id)
+      .sort((a, b) => (b.hospital_count ?? 0) - (a.hospital_count ?? 0) || a.name.localeCompare(b.name));
+    return [...own, ...rest];
+  }, [districts, user?.district_id]);
+
   const visible = useMemo(() => {
     const list = incidents ?? [];
     if (filter === 'open') return list.filter((i) => i.status === 'open');
@@ -200,6 +228,15 @@ export default function ConsoleScreen() {
   }, [incidents, filter]);
 
   const createIncident = async () => {
+    // A location is mandatory now, and refusing early is the point: the previous
+    // default meant an operator could raise an incident without ever answering
+    // "where", and the platform would silently invent an answer.
+    if (!location) {
+      setIntakeError(
+        'Set the incident location first. The shortlist is ranked by drive time from it, so an unset location produces a plan for the wrong journey.',
+      );
+      return;
+    }
     setSubmitting(true);
     setIntakeError(null);
     try {
@@ -210,8 +247,16 @@ export default function ConsoleScreen() {
         {
           category,
           urgency,
-          lat: districtLatLng(districts, districtId)?.lat ?? 11.0168,
-          lng: districtLatLng(districts, districtId)?.lng ?? 76.9558,
+          // The caller's location, captured by the operator. This used to be
+          // `districtLatLng(...)`, which put every incident in Coimbatore at the
+          // district centre regardless of where the caller was — and since the
+          // matching engine ranks hospitals by drive time *from this point*, a
+          // call from Pollachi was matched as though it had come from the middle
+          // of the city. See LocationPicker for the capture order.
+          lat: location!.lat,
+          lng: location!.lng,
+          location_source: location!.source,
+          taluk: taluk.trim() || null,
           landmark: landmark.trim() || 'Landmark pending — operator to confirm',
           district_id: Number(districtId),
           ...scene,
@@ -225,6 +270,8 @@ export default function ConsoleScreen() {
       );
       setComposerOpen(false);
       setLandmark('');
+      setTaluk('');
+      setLocation(null);
       setScene({
         patient_state: 'unknown',
         mechanism: 'none',
@@ -312,25 +359,47 @@ export default function ConsoleScreen() {
         />
       </Stack>
 
-      <TextField
-        label="Location"
-        value={landmark}
-        onChangeText={setLandmark}
-        placeholder="Street, junction, building or landmark"
-        icon="pin"
-        maxLength={200}
-      />
-
+      {/* District first, then landmark, then the coordinate capture: the
+          coordinate is scoped to the district (see LocationPicker), so asking
+          for it before the district is known would invite a pin in the wrong
+          one. */}
       <Stack gap="sm">
         <Label>District</Label>
         <Segmented
-          options={districts.map((d) => ({ value: String(d.id), label: d.name }))}
+          options={districtOptions.map((d) => ({ value: String(d.id), label: d.name }))}
           value={districtId}
           onChange={setDistrictId}
           size="sm"
           scroll
         />
       </Stack>
+
+      <TextField
+        label="Landmark"
+        value={landmark}
+        onChangeText={setLandmark}
+        placeholder="Street, junction, building or landmark"
+        icon="pin"
+        maxLength={200}
+        hint="Read back to the caller. The crew navigates to this, and it is the only free text on the record."
+      />
+
+      <TextField
+        label="Taluk / area"
+        value={taluk}
+        onChangeText={setTaluk}
+        placeholder="e.g. Mettupalayam"
+        icon="grid"
+        maxLength={80}
+        hint="Supporting detail. The coordinate leads; this confirms it."
+      />
+
+      <LocationPicker
+        districts={districts}
+        districtId={districtId}
+        value={location}
+        onChange={setLocation}
+      />
 
       {/* Scene assessment -------------------------------------------------
           Structured, not narrated. The report's intake requirement is a
@@ -624,11 +693,6 @@ export default function ConsoleScreen() {
       )}
     </AppShell>
   );
-}
-
-function districtLatLng(districts: District[], id: string): { lat: number; lng: number } | null {
-  const d = districts.find((x) => String(x.id) === id);
-  return d ? { lat: d.lat, lng: d.lng } : null;
 }
 
 /* -------------------------------------------------------------- incident card */

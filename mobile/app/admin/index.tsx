@@ -2,14 +2,18 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { RefreshControl, ScrollView, StyleSheet, View } from 'react-native';
 
 import { api, ApiError } from '../../src/api/client';
+import { FleetPanel } from './FleetPanel';
 import type {
   AdminUser,
+  Ambulance,
   AuditEntry,
   Complaint,
   Connector,
   ConnectorEstate,
   ConnectorTemplate,
+  District,
   Facility,
+  FleetDirectory,
   IssuedConnectorKey,
   OnboardingApplication,
   Role,
@@ -59,7 +63,7 @@ import { useResponsive } from '../../src/ui/useResponsive';
  * of the others.
  */
 
-type Tab = 'users' | 'connectors' | 'onboarding' | 'audit' | 'complaints';
+type Tab = 'users' | 'fleet' | 'connectors' | 'onboarding' | 'audit' | 'complaints';
 
 const ROLE_LABEL: Record<string, string> = {
   platform_admin: 'Platform admin',
@@ -111,6 +115,8 @@ export default function AdminConsole() {
   const [templates, setTemplates] = useState<ConnectorTemplate[]>([]);
   const [queue, setQueue] = useState<OnboardingApplication[]>([]);
   const [facilities, setFacilities] = useState<Facility[]>([]);
+  const [districts, setDistricts] = useState<District[]>([]);
+  const [fleetSize, setFleetSize] = useState<number | null>(null);
 
   const isAdmin = user?.role === 'platform_admin';
 
@@ -120,7 +126,7 @@ export default function AdminConsole() {
       if (manual) setRefreshing(true);
       setError(null);
       try {
-        const [u, c, e, tpl, q, f, a, fb] = await Promise.all([
+        const [u, c, e, tpl, q, f, a, fb, dist, fleet] = await Promise.all([
           api.get<{ results: AdminUser[] }>('/governance/users', { token }),
           api.get<{ results: Connector[] }>('/connectors', { token }),
           api.get<ConnectorEstate>('/connectors/estate', { token }),
@@ -129,6 +135,8 @@ export default function AdminConsole() {
           api.get<{ results: Facility[] }>('/hospitals?include_unverified=true&limit=200', { token }),
           api.get<{ results: AuditEntry[] }>('/governance/audit?hours=72&limit=300', { token }),
           api.get<{ results: Complaint[] }>('/governance/feedback', { token }),
+          api.get<{ results: District[] }>('/hospitals/districts', { token }),
+          api.get<{ count: number }>('/ambulances?limit=1', { token }),
         ]);
         setUsers(u.results);
         setConnectors(c.results);
@@ -138,6 +146,8 @@ export default function AdminConsole() {
         setFacilities(f.results);
         setAudit(a.results);
         setComplaints(fb.results);
+        setDistricts(dist.results);
+        setFleetSize(fleet.count);
       } catch (err) {
         setError(err instanceof ApiError ? err.message : 'Could not load the operations data');
       } finally {
@@ -199,7 +209,7 @@ export default function AdminConsole() {
   return (
     <AppShell
       title="Platform operations"
-      subtitle={`${estate?.facilities ?? 0} facilities · ${connectors.length} connectors · ${users.length} accounts`}
+      subtitle={`${estate?.facilities ?? 0} facilities · ${fleetSize ?? 0} ambulances · ${connectors.length} connectors · ${users.length} accounts`}
       maxWidth={1320}
       actions={
         <Button label="Refresh" variant="ghost" icon="refresh" onPress={() => load(true)} disabled={refreshing} />
@@ -222,6 +232,7 @@ export default function AdminConsole() {
             onChange={setTab}
             options={[
               { value: 'users', label: `Accounts ${users.length}` },
+              { value: 'fleet', label: `Fleet ${fleetSize ?? '—'}` },
               { value: 'connectors', label: `Connectors ${connectors.length}` },
               { value: 'onboarding', label: `Onboarding ${queue.length}` },
               { value: 'complaints', label: `Complaints ${complaints.filter((c) => c.status === 'open').length}` },
@@ -231,7 +242,17 @@ export default function AdminConsole() {
         </Row>
 
         {tab === 'users' ? (
-          <UsersPanel users={users} facilities={facilities} onChange={load} onFlash={setFlash} />
+          <UsersPanel
+          users={users}
+          facilities={facilities}
+          districts={districts}
+          onChange={load}
+          onFlash={setFlash}
+        />
+        ) : null}
+
+        {tab === 'fleet' ? (
+          <FleetPanel districts={districts} onChange={load} onFlash={setFlash} />
         ) : null}
 
         {tab === 'connectors' ? (
@@ -264,11 +285,13 @@ export default function AdminConsole() {
 function UsersPanel({
   users,
   facilities,
+  districts,
   onChange,
   onFlash,
 }: {
   users: AdminUser[];
   facilities: Facility[];
+  districts: District[];
   onChange: () => void;
   onFlash: (f: { tone: 'live' | 'warm' | 'critical'; title: string; body?: string }) => void;
 }) {
@@ -286,19 +309,54 @@ function UsersPanel({
     role: 'hospital_admin' as Role,
     hospital_id: '',
     district_id: '',
+    ambulance_id: '',
     phone: '',
   });
+
+  const [crewless, setCrewless] = useState<Ambulance[]>([]);
 
   const filtered = useMemo(
     () => users.filter((u) => roleFilter === 'all' || u.role === roleFilter),
     [users, roleFilter],
   );
 
+  /**
+   * District chooser, jurisdiction first, then by fleet size.
+   *
+   * The previous control was a free-text box labelled "District id" with
+   * "1 = Coimbatore" as the placeholder, which is a database column exposed as a
+   * form field. Provisioning is done under time pressure by somebody who knows
+   * district names and not primary keys.
+   */
+  const districtOptions = useMemo(
+    () =>
+      [...districts].sort(
+        (a, b) => (b.hospital_count ?? 0) - (a.hospital_count ?? 0) || a.name.localeCompare(b.name),
+      ),
+    [districts],
+  );
+
+  // Loaded when the crew role is selected, so the picker is over real vehicles.
+  const loadCrewless = useCallback(async () => {
+    if (!token) return;
+    try {
+      const dir = await api.get<FleetDirectory>('/ambulances/drivers', { token });
+      setCrewless(dir.crewless_units);
+    } catch {
+      setCrewless([]);
+    }
+  }, [token]);
+
+  useEffect(() => {
+    if (form.role === 'driver') void loadCrewless();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [form.role]);
+
   const submit = useCallback(async () => {
     if (!token) return;
     setBusy(-1);
     try {
-      await api.post(
+      const created = await api.post<{ id: number; full_name: string }>(
         '/governance/users',
         {
           full_name: form.full_name.trim(),
@@ -312,12 +370,50 @@ function UsersPanel({
         },
         { token },
       );
+
+      // Link the vehicle in the same action. Two requests, because creating a
+      // person and equipping them are different records -- but one button,
+      // because "create a driver" that produced a driver who cannot be
+      // dispatched would be a half-finished workflow dressed up as a complete
+      // one. The link is best-effort: if it fails the account still exists and
+      // the Fleet tab reports the orphan driver, which is a visible state.
+      let linked: string | null = null;
+      if (form.role === 'driver' && form.ambulance_id && token) {
+        try {
+          await api.post(
+            `/ambulances/${form.ambulance_id}/crew`,
+            { driver_user_id: created.id },
+            { token },
+          );
+          linked = crewless.find((a) => String(a.id) === form.ambulance_id)?.call_sign ?? null;
+        } catch (linkErr) {
+          onFlash({
+            tone: 'warm',
+            title: `${form.full_name.trim()} was created but no vehicle was linked`,
+            body:
+              (linkErr instanceof ApiError ? linkErr.message : 'The vehicle link failed.') +
+              ' Link one from the Fleet tab before they go on shift.',
+          });
+        }
+      }
+
       onFlash({
         tone: 'live',
         title: `Account created for ${form.full_name.trim()}`,
-        body: `${ROLE_LABEL[form.role] ?? form.role} · they can sign in with the password you set and should change it.`,
+        body:
+          `${ROLE_LABEL[form.role] ?? form.role} · they can sign in with the password you set and should change it.` +
+          (linked ? ` Linked to ${linked}.` : ''),
       });
-      setForm({ full_name: '', email: '', password: '', role: 'hospital_admin', hospital_id: '', district_id: '', phone: '' });
+      setForm({
+        full_name: '',
+        email: '',
+        password: '',
+        role: 'hospital_admin',
+        hospital_id: '',
+        district_id: '',
+        ambulance_id: '',
+        phone: '',
+      });
       setAdding(false);
       onChange();
     } catch (err) {
@@ -453,15 +549,60 @@ function UsersPanel({
               ) : null}
 
               {form.role !== 'hospital_admin' ? (
-                <View style={{ maxWidth: 320 }}>
-                  <TextField
-                    label="District id"
+                <Stack gap="sm">
+                  <Label>Jurisdiction</Label>
+                  <Segmented
+                    size="sm"
+                    scroll
                     value={form.district_id}
-                    onChangeText={(v) => setForm((f) => ({ ...f, district_id: v }))}
-                    placeholder="1 = Coimbatore"
-                    keyboardType="number-pad"
+                    onChange={(v) => setForm((f) => ({ ...f, district_id: v }))}
+                    options={districtOptions.map((d) => ({ value: String(d.id), label: d.name }))}
                   />
-                </View>
+                  <Small muted>
+                    {form.role === 'driver'
+                      ? 'The district this crew reports to. Their vehicle’s base district is what the matching engine actually reads, and the two are kept in step when you link a vehicle below.'
+                      : 'Scopes what this account can see and change. A district dispatcher sees their own district; a state account sees everything.'}
+                  </Small>
+                </Stack>
+              ) : null}
+
+              {/* A crew account with no vehicle is the failure this whole form
+                  exists to prevent: their screen calls GET /crew/assignment,
+                  finds nothing, and shows an empty state on the one device that
+                  has to work at 3 a.m. So the link is offered here, on the
+                  screen where the account is made, rather than as a follow-up
+                  step somebody has to remember. */}
+              {form.role === 'driver' ? (
+                <Stack gap="sm">
+                  <Label>Assign a vehicle</Label>
+                  {crewless.length === 0 ? (
+                    <Small muted>
+                      Every vehicle already has a crew. Add one from the Fleet tab first, or create
+                      the account and link it later — but a crew account with no vehicle cannot be
+                      dispatched.
+                    </Small>
+                  ) : (
+                    <>
+                      <Segmented
+                        size="sm"
+                        scroll
+                        value={form.ambulance_id}
+                        onChange={(v) => setForm((f) => ({ ...f, ambulance_id: v }))}
+                        options={[
+                          { value: '', label: 'Link later' },
+                          ...crewless.map((a) => ({
+                            value: String(a.id),
+                            label: `${a.call_sign} · ${a.capability_label}`,
+                          })),
+                        ]}
+                      />
+                      <Small muted>
+                        Only vehicles without a crew are listed. Moving a driver between vehicles is
+                        done from the Fleet tab, where the old vehicle is released at the same time.
+                      </Small>
+                    </>
+                  )}
+                </Stack>
               ) : null}
 
               <Row gap={space.md} align="center">

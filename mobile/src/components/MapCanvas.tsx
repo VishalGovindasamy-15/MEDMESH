@@ -37,6 +37,15 @@ interface Props {
   showLabels?: boolean;
   /** Schematic corridor to overlay, when a real route could not be resolved. */
   route?: { origin: { lat: number; lng: number }; destination: { lat: number; lng: number } } | null;
+  /**
+   * Fixed projection origin. Supplied only by the tap-to-place case: with it,
+   * the canvas stops auto-fitting to its own points and draws a stable grid at a
+   * known scale, which is the only condition under which a tap can be converted
+   * back into a coordinate.
+   */
+  center?: { lat: number; lng: number } | null;
+  zoom?: number | null;
+  onPress?: (point: { lat: number; lng: number }) => void;
 }
 
 export function MapCanvas({
@@ -49,8 +58,46 @@ export function MapCanvas({
   originLabel,
   showLabels = true,
   route = null,
+  center = null,
+  zoom = null,
+  onPress,
 }: Props) {
   const { t } = useTheme();
+
+  /**
+   * Two projection modes.
+   *
+   * The default auto-fits the canvas to whatever points it is given, which is
+   * right for a directory map — the state fills the frame. It is *not* right for
+   * a map somebody is about to tap: the frame would move every time a point
+   * arrived, so the same tap could mean two different places a second apart.
+   *
+   * When `center` and `zoom` are supplied the canvas becomes a fixed
+   * equirectangular projection anchored on that point, at the same scale as the
+   * Google map it is standing in for. A tap then converts back to a coordinate
+   * unambiguously, and the pins stay where they were put.
+   */
+  const fixed = Boolean(center && zoom);
+  const projection = useMemo(() => {
+    if (fixed && center && zoom) {
+      // Web Mercator metres-per-pixel at this latitude and zoom, the same figure
+      // the Maps SDK uses, so the two renderings agree at the same zoom level.
+      const metresPerPixel = (156543.03392 * Math.cos((center.lat * Math.PI) / 180)) / 2 ** zoom;
+      const toXY = (p: { lat: number; lng: number }) => ({
+        x: width / 2 + ((p.lng - center.lng) * 111320 * Math.cos((center.lat * Math.PI) / 180)) / metresPerPixel,
+        y: height / 2 - ((p.lat - center.lat) * 110540) / metresPerPixel,
+      });
+      const toLatLng = (x: number, y: number) => ({
+        lat: center.lat - ((y - height / 2) * metresPerPixel) / 110540,
+        lng: center.lng + ((x - width / 2) * metresPerPixel) / (111320 * Math.cos((center.lat * Math.PI) / 180)),
+      });
+      return { toXY, toLatLng };
+    }
+    return {
+      toXY: (_p: { lat: number; lng: number }) => ({ x: 0, y: 0 }),
+      toLatLng: null,
+    };
+  }, [fixed, center, zoom, width, height]);
 
   const projected = useMemo(() => {
     const coords = [
@@ -58,8 +105,11 @@ export function MapCanvas({
       ...(origin ? [origin] : []),
       ...(route ? [route.origin, route.destination] : []),
     ];
+    if (fixed && center) {
+      return coords.map((c) => projection.toXY(c));
+    }
     return projectToCanvas(coords, width, height, 34);
-  }, [markers, origin, route, width, height]);
+  }, [markers, origin, route, width, height, fixed, center, projection]);
 
   const originIndex = origin ? markers.length : -1;
 
@@ -73,7 +123,10 @@ export function MapCanvas({
       route.origin,
       route.destination,
     ];
-    const pts = projectToCanvas(all, width, height, 34);
+    const pts =
+      fixed && center
+        ? all.map((p) => projection.toXY(p))
+        : projectToCanvas(all, width, height, 34);
     const a = pts[all.length - 2];
     const b = pts[all.length - 1];
     if (!a || !b) return null;
@@ -296,10 +349,37 @@ export function MapCanvas({
           fill={t.bg.surface}
           opacity={0.86}
         />
+        {fixed && center ? (
+          <>
+            {/* Anchor crosshair. Without it the fixed projection has no visual
+                reference and a tap feels arbitrary; with it, "the pin goes where
+                I press" is obvious. */}
+            <Line x1={width / 2 - 9} x2={width / 2 + 9} y1={height / 2} y2={height / 2} stroke={t.accent.base} strokeWidth={1.2} />
+            <Line x1={width / 2} x2={width / 2} y1={height / 2 - 9} y2={height / 2 + 9} stroke={t.accent.base} strokeWidth={1.2} />
+            <Circle cx={width / 2} cy={height / 2} r={3.4} fill="none" stroke={t.accent.base} strokeWidth={1.2} />
+          </>
+        ) : null}
         <SvgTextNode x={7} y={height - 5.5} fill={t.fg.faint} fontSize={8.5} fontFamily={mono}>
-          SCHEMATIC · TRUE COORDINATES · NOT TO SCALE
+          {fixed
+            ? `SCHEMATIC · TAP TO PLACE · CENTRED ${center?.lat.toFixed(3)}, ${center?.lng.toFixed(3)}`
+            : 'SCHEMATIC · TRUE COORDINATES · NOT TO SCALE'}
         </SvgTextNode>
       </Svg>
+
+      {/* Tap-to-place layer. Sits above the SVG but below the pin hit targets,
+          so tapping a facility still selects it while tapping open ground drops
+          the pin. Only mounted when the caller supplied both a handler and a
+          fixed projection -- see the note on `projection` above. */}
+      {onPress && projection.toLatLng ? (
+        <Pressable
+          onPress={(event) => {
+            const { locationX, locationY } = event.nativeEvent;
+            onPress(projection.toLatLng!(locationX, locationY));
+          }}
+          accessibilityLabel="Tap to place a point"
+          style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: height }}
+        />
+      ) : null}
 
       {/* Hit targets sit above the SVG so taps resolve reliably on web, where
           SVG-in-RN hit testing is inconsistent. */}

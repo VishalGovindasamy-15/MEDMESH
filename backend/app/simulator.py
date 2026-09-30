@@ -51,7 +51,7 @@ from .models import (
 )
 from .repository import active_holds, sync_hold_projection
 from .routers.hospitals import ingest_capacity
-from .services import audit, references
+from .services import audit, lifecycle, references
 from .services.geo import estimate_leg
 
 log = logging.getLogger("medmesh.simulator")
@@ -185,8 +185,15 @@ def _workflow_tick() -> None:
                         (
                             IncidentStatus.DISPATCHED,
                             IncidentStatus.EN_ROUTE,
-                            IncidentStatus.ARRIVED,
+                            IncidentStatus.AT_SCENE,
+                            IncidentStatus.PATIENT_ONBOARD,
+                            IncidentStatus.TRANSPORTING,
+                            IncidentStatus.AT_HOSPITAL,
                             IncidentStatus.HANDED_OVER,
+                            # Deprecated spelling. Rows written before the state
+                            # model was completed still carry it, and a case
+                            # sitting on one never advanced again.
+                            IncidentStatus.ARRIVED,
                         )
                     )
                 )
@@ -207,7 +214,13 @@ def _workflow_tick() -> None:
             target = None
             if incident.status in (IncidentStatus.DISPATCHED, IncidentStatus.EN_ROUTE):
                 target = (incident.lat, incident.lng)
-            elif incident.status in (IncidentStatus.ARRIVED, IncidentStatus.HANDED_OVER) and hospital:
+            elif incident.status in (
+                IncidentStatus.PATIENT_ONBOARD,
+                IncidentStatus.TRANSPORTING,
+                IncidentStatus.AT_HOSPITAL,
+                IncidentStatus.ARRIVED,
+                IncidentStatus.HANDED_OVER,
+            ) and hospital:
                 target = (hospital.lat, hospital.lng)
 
             if target and _rng.random() < 0.85:
@@ -231,21 +244,77 @@ def _workflow_tick() -> None:
                     float(estimate_leg(incident.lat, incident.lng, hospital.lat, hospital.lng).eta_minutes),
                     2.0,
                 )
+            # Outbound leg is scene-bound; the inbound leg is the same geometry
+            # run the other way, and they are genuinely different durations in
+            # this dataset (a hill road out, a highway back).
+            travel_min = 8.0
+            transport_min = 8.0
+            if hospital is not None:
+                travel_min = max(
+                    float(estimate_leg(incident.lat, incident.lng, hospital.lat, hospital.lng).eta_minutes),
+                    2.0,
+                )
+                transport_min = max(
+                    float(estimate_leg(hospital.lat, hospital.lng, incident.lat, incident.lng).eta_minutes),
+                    2.0,
+                )
             arrive_after = min(max(travel_min * DEMO_PACE, 420.0), 1500.0)
-            handover_after = arrive_after + min(max(ON_SCENE_MINUTES * DEMO_PACE, 240.0), 900.0)
+            # On-scene time is what separates "arrived" from "loaded", and it is
+            # the interval the audit said the platform could not measure at all.
+            scene_load_after = arrive_after + min(max(SCENE_LOAD_MINUTES * DEMO_PACE, 180.0), 720.0)
+            depart_after = scene_load_after + 20
+            hospital_after = depart_after + min(max(transport_min * DEMO_PACE, 300.0), 1200.0)
+            handover_after = hospital_after + min(max(HANDOVER_MINUTES * DEMO_PACE, 120.0), 600.0)
+
+            # --- the trip, stage by stage ---------------------------------
+            # The simulator used to jump EN_ROUTE -> ARRIVED -> HANDED_OVER,
+            # which meant the demo exercised three of the seven states the
+            # driver app puts buttons on and populated none of the split
+            # timestamps. Every intermediate column is now written the same way
+            # a real crew writes it -- through `apply_timestamps` -- so the
+            # analytics in this build are computed from the same lifecycle the
+            # production path uses rather than from a fixed-offset script.
+
+            def advance(status: IncidentStatus, when) -> None:
+                incident.status = status
+                lifecycle.apply_timestamps(incident, status, when)
+                broadcasts.append(
+                    (
+                        "incident.status",
+                        {
+                            "incident_id": incident.id,
+                            "reference": incident.reference,
+                            "status": status.value,
+                        },
+                    )
+                )
+
+            # Any deprecated row is moved onto the current vocabulary first, so
+            # one stale status cannot stall a case forever.
+            if incident.status is IncidentStatus.ARRIVED:
+                incident.status = IncidentStatus.AT_SCENE
+                if incident.arrived_at is None:
+                    incident.arrived_at = now
+                if incident.scene_arrived_at is None:
+                    incident.scene_arrived_at = incident.arrived_at
 
             if incident.status is IncidentStatus.DISPATCHED and age > 25:
-                incident.status = IncidentStatus.EN_ROUTE
+                advance(IncidentStatus.EN_ROUTE, now)
                 ambulance.status = AmbulanceStatus.EN_ROUTE
-                broadcasts.append(("incident.status", {"incident_id": incident.id, "reference": incident.reference, "status": "en_route"}))
             elif incident.status is IncidentStatus.EN_ROUTE and age > arrive_after:
-                incident.status = IncidentStatus.ARRIVED
-                incident.arrived_at = now
+                advance(IncidentStatus.AT_SCENE, now)
+                ambulance.status = AmbulanceStatus.AT_SCENE
+            elif incident.status is IncidentStatus.AT_SCENE and age > scene_load_after:
+                advance(IncidentStatus.PATIENT_ONBOARD, now)
+                ambulance.status = AmbulanceStatus.AT_SCENE
+            elif incident.status is IncidentStatus.PATIENT_ONBOARD and age > depart_after:
+                advance(IncidentStatus.TRANSPORTING, now)
                 ambulance.status = AmbulanceStatus.TRANSPORTING
-                broadcasts.append(("incident.status", {"incident_id": incident.id, "reference": incident.reference, "status": "arrived"}))
-            elif incident.status is IncidentStatus.ARRIVED and age > handover_after:
-                incident.status = IncidentStatus.HANDED_OVER
-                incident.closed_at = now
+            elif incident.status is IncidentStatus.TRANSPORTING and age > hospital_after:
+                advance(IncidentStatus.AT_HOSPITAL, now)
+                ambulance.status = AmbulanceStatus.TRANSPORTING
+            elif incident.status is IncidentStatus.AT_HOSPITAL and age > handover_after:
+                advance(IncidentStatus.HANDED_OVER, now)
                 ambulance.status = AmbulanceStatus.AVAILABLE
                 for hold in active_holds(db):
                     if hold.incident_id == incident.id:
@@ -434,7 +503,10 @@ def _auto_dispatch(db, incident: Incident, now) -> bool:
 # Wall-clock seconds a real travel minute costs in the pilot dataset. See the
 # lifecycle block in _workflow_tick for why this is not a fixed constant.
 DEMO_PACE = 20.0
-ON_SCENE_MINUTES = 8.0
+#: Minutes between reaching the patient and having them aboard.
+SCENE_LOAD_MINUTES = 5.0
+#: Minutes at the receiving desk between arrival and the handover being signed.
+HANDOVER_MINUTES = 6.0
 
 # Scene vocabulary for the simulator, keyed by what the call is about.
 _MECHANISM_BY_CATEGORY = {

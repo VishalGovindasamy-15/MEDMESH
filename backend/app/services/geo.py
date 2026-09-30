@@ -25,6 +25,25 @@ from ..config import settings
 
 EARTH_R_KM = 6371.0088
 
+# The state rectangle, inclusive, with a margin wide enough for the coastal
+# belt. Used to reject incident coordinates that cannot be in Tamil Nadu -- a
+# transposed latitude, a stray decimal place, a stale default. The frontend
+# enforces the same box (see `mobile/src/components/LocationPicker.tsx`) so the
+# operator is corrected while they are still on the call rather than with a 422.
+TN_BOUNDS = {
+    "lat_min": 7.5,
+    "lat_max": 14.5,
+    "lng_min": 75.5,
+    "lng_max": 81.0,
+}
+
+
+def in_tamil_nadu(lat: float, lng: float) -> bool:
+    return (
+        TN_BOUNDS["lat_min"] <= lat <= TN_BOUNDS["lat_max"]
+        and TN_BOUNDS["lng_min"] <= lng <= TN_BOUNDS["lng_max"]
+    )
+
 
 @dataclass(slots=True)
 class Leg:

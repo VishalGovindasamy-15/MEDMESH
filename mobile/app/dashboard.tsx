@@ -52,6 +52,93 @@ import { useResponsive } from '../src/ui/useResponsive';
  *    nudge loop described in §6.2, not just a badge for outsiders.
  */
 
+/**
+ * Specialty catalogue for the roster editor.
+ *
+ * A closed list, mirroring `GET /hospitals/specialties`, because specialty is
+ * the *first* step of the matching chain: an incident for a cardiac case asks
+ * for `cardiology`, and a facility whose cardiologist was entered as "Heart" or
+ * "Cardio" contributes nothing to that answer. Free text here would be a typo
+ * away from a silent hole in statewide coverage.
+ */
+const DOCTOR_SPECIALTIES: { value: string; label: string }[] = [
+  { value: 'burns', label: 'Burns' },
+  { value: 'cardiology', label: 'Cardiology' },
+  { value: 'critical_care', label: 'Critical Care' },
+  { value: 'gastroenterology', label: 'Gastroenterology' },
+  { value: 'general_medicine', label: 'General Medicine' },
+  { value: 'general_surgery', label: 'General Surgery' },
+  { value: 'gynaecology', label: 'Gynaecology' },
+  { value: 'nephrology', label: 'Nephrology' },
+  { value: 'neurology', label: 'Neurology' },
+  { value: 'neurosurgery', label: 'Neurosurgery' },
+  { value: 'obstetrics', label: 'Obstetrics' },
+  { value: 'oncology', label: 'Oncology' },
+  { value: 'orthopaedics', label: 'Orthopaedics' },
+  { value: 'paediatrics', label: 'Paediatrics' },
+  { value: 'plastic_surgery', label: 'Plastic Surgery' },
+  { value: 'psychiatry', label: 'Psychiatry' },
+  { value: 'pulmonology', label: 'Pulmonology' },
+  { value: 'trauma', label: 'Trauma' },
+  { value: 'urology', label: 'Urology' },
+];
+
+/**
+ * The subset a dispatch decision can actually turn on.
+ *
+ * A facility with no psychiatrist is not a coverage gap for emergency transport;
+ * one with no trauma surgeon is. Listing all nineteen as gaps would cry wolf on
+ * every hospital and make the warning worth ignoring.
+ */
+const EMERGENCY_SPECIALTIES = [
+  'trauma',
+  'cardiology',
+  'critical_care',
+  'neurology',
+  'neurosurgery',
+  'obstetrics',
+  'paediatrics',
+  'general_surgery',
+  'burns',
+  'pulmonology',
+];
+
+interface DoctorDraft {
+  id?: number;
+  full_name: string;
+  specialty: string;
+  designation: string;
+  registration_no: string;
+  shift_window: string;
+  on_duty: boolean;
+  accepts_emergency: boolean;
+}
+
+function defaultDoctor(): DoctorDraft {
+  return {
+    full_name: '',
+    specialty: 'general_medicine',
+    designation: 'Consultant',
+    registration_no: '',
+    shift_window: '08:00 – 20:00',
+    on_duty: true,
+    accepts_emergency: true,
+  };
+}
+
+function toDraft(doc: Doctor): DoctorDraft {
+  return {
+    id: doc.id,
+    full_name: doc.full_name,
+    specialty: doc.specialty,
+    designation: doc.designation,
+    registration_no: doc.registration_no ?? '',
+    shift_window: doc.shift_window,
+    on_duty: doc.on_duty,
+    accepts_emergency: doc.accepts_emergency,
+  };
+}
+
 export default function HospitalDashboard() {
   const { t } = useTheme();
   const { user, token } = useAuth();
@@ -65,6 +152,9 @@ export default function HospitalDashboard() {
   const [busy, setBusy] = useState<string | null>(null);
   const [flash, setFlash] = useState<{ tone: 'live' | 'warm' | 'critical'; title: string; body?: string } | null>(null);
   const [inbound, setInbound] = useState<any[]>([]);
+  const [answering, setAnswering] = useState<any | null>(null);
+  const [acknowledged, setAcknowledged] = useState<Record<number, string>>({});
+  const [draftDoctor, setDraftDoctor] = useState<DoctorDraft | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [advanced, setAdvanced] = useState(false);
   const [reporting, setReporting] = useState(false);
@@ -124,6 +214,10 @@ export default function HospitalDashboard() {
 
   const live = hospitalId ? facilities[hospitalId]?.capacity : null;
   const capacity: Capacity | null = live ?? detail?.capacity ?? null;
+  // Staff-scoped field: the API sends it to this ward and omits it elsewhere.
+  // Default to empty so a ward that somehow loses the scope sees "no holds"
+  // instead of a blank screen.
+  const holds = detail?.active_holds ?? [];
 
   const quickAdjust = async (deltas: Record<string, number>, edCongestion?: string, waitingDelta?: number) => {
     if (!hospitalId) return;
@@ -161,27 +255,85 @@ export default function HospitalDashboard() {
     }
   };
 
+  /**
+   * The full-form update.
+   *
+   * Every field used to be sent through `Number(...)`, and `Number('')` is 0 —
+   * not NaN, not an error, zero. So a clerk who opened the form to correct the
+   * ICU count and left the other five boxes alone published "zero beds, zero
+   * ventilators, zero blood units" for their entire facility, the trust engine
+   * saw a large drop on three counters at once and quarantined it as an anomaly
+   * — which is the only reason anybody noticed. On a quieter change it would
+   * simply have been wrong in the directory.
+   *
+   * The fix is to treat an empty field as *absent* rather than as zero. The API
+   * takes a partial body, so an untouched field is left out and the server keeps
+   * what it had. The form also says which fields it is about to change, because
+   * a partial update that silently does nothing is its own kind of confusing.
+   */
+  const changedFields = useMemo(() => {
+    const map: Record<string, string> = {
+      beds: 'beds_available',
+      icu: 'icu_available',
+      vent: 'ventilators_available',
+      blood: 'blood_units',
+      antivenom: 'antivenom_vials',
+      waiting: 'ed_waiting',
+    };
+    return Object.entries(map)
+      .filter(([field]) => String((form as any)[field]).trim() !== '')
+      .map(([, apiField]) => apiField);
+  }, [form]);
+
   const submitFull = async () => {
     if (!hospitalId) return;
     setBusy('full');
     setFlash(null);
+
+    const unknown = Object.keys(form).filter((k) => String((form as any)[k]).trim() === '');
+    if (unknown.length === Object.keys(form).length) {
+      setFlash({
+        tone: 'warm',
+        title: 'Nothing to publish',
+        body: 'Fill in at least one counter. Untouched boxes are left as they are rather than reset to zero.',
+      });
+      setBusy(null);
+      return;
+    }
+
     try {
-      const res = await api.post<any>(
-        `/hospitals/${hospitalId}/capacity`,
-        {
-          beds_available: Number(form.beds),
-          icu_available: Number(form.icu),
-          ventilators_available: Number(form.vent),
-          blood_units: Number(form.blood),
-          antivenom_vials: Number(form.antivenom),
-          ed_waiting: Number(form.waiting),
-          ed_congestion: capacity?.ed_congestion ?? 'moderate',
-        },
-        { token },
-      );
+      const body: Record<string, unknown> = {
+        ed_congestion: capacity?.ed_congestion ?? 'moderate',
+      };
+      // Only the filled-in counters travel. See the note above: an omitted field
+      // is "unchanged", and that is the difference between correcting one number
+      // and wiping five.
+      for (const [field, value] of Object.entries(form)) {
+        const trimmed = String(value).trim();
+        if (trimmed === '') continue;
+        const parsed = Number(trimmed);
+        if (!Number.isFinite(parsed) || parsed < 0) {
+          setFlash({ tone: 'critical', title: 'Not a number', body: `“${trimmed}” is not a valid count.` });
+          setBusy(null);
+          return;
+        }
+        (body as any)[
+          { beds: 'beds_available', icu: 'icu_available', vent: 'ventilators_available', blood: 'blood_units', antivenom: 'antivenom_vials', waiting: 'ed_waiting' }[
+            field
+          ]!
+        ] = Math.round(parsed);
+      }
+
+      const res = await api.post<any>(`/hospitals/${hospitalId}/capacity`, body, { token });
       setFlash(
         res.accepted
-          ? { tone: 'live', title: 'Full update published', body: `Trust score ${res.trust.score} (${res.trust.band}).` }
+          ? {
+              tone: 'live',
+              title: 'Update published',
+              body: `${changedFields.length} counter${changedFields.length === 1 ? '' : 's'} written (${changedFields
+                .map((f) => f.replace(/_/g, ' '))
+                .join(', ')}) · trust ${res.trust.score} (${res.trust.band}).`,
+            }
           : {
               tone: 'critical',
               title: 'Update withheld',
@@ -191,6 +343,119 @@ export default function HospitalDashboard() {
       await load(true);
     } catch (err) {
       setFlash({ tone: 'critical', title: 'Update rejected', body: err instanceof ApiError ? err.message : undefined });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  /**
+   * Answer an inbound alert.
+   *
+   * The ward previously had nowhere to reply: a notification arrived, and the
+   * only way to say "that ICU bed is in fact occupied" was to telephone a
+   * control room that had no field to record it in. The hold then sat until it
+   * expired and the next shortlist for the *next* incident still showed the bed
+   * as free. Both answers now exist, and the decline carries a structured reason
+   * that is also used as a capacity correction.
+   */
+  const answerInbound = async (alert: any, response: 'accepted' | 'declined', reason?: string, note?: string) => {
+    if (!hospitalId) return;
+    setBusy(`inbound:${alert.incident_id}`);
+    try {
+      const res = await api.post<any>(
+        `/incidents/${alert.incident_id}/facility-response`,
+        { response, reason: reason ?? null, note: note ?? null },
+        { token },
+      );
+      setAcknowledged((prev) => ({
+        ...prev,
+        [alert.incident_id]: response === 'accepted' ? 'accepted' : 'declined',
+      }));
+      setFlash(
+        response === 'accepted'
+          ? {
+              tone: 'live',
+              title: `${alert.reference} confirmed`,
+              body: 'Dispatch can see that this ward has read the prep alert.',
+            }
+          : {
+              tone: 'warm',
+              title: `${alert.reference} declined`,
+              body:
+                `${res.released_holds} hold(s) released immediately and dispatch notified. ` +
+                (res.capacity_corrected !== null && res.capacity_corrected !== undefined
+                  ? 'The ICU count was corrected to zero, so the same mistake will not be repeated for another incident.'
+                  : 'The reason has been recorded against the facility.'),
+            },
+      );
+      setAnswering(null);
+      await load(true);
+    } catch (err) {
+      setFlash({
+        tone: 'critical',
+        title: 'Could not send the answer',
+        body: err instanceof ApiError ? err.message : undefined,
+      });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  /**
+   * Create or update a clinician.
+   *
+   * One handler for both because the API is one endpoint per verb and the only
+   * difference is whether there is an id to send it to; splitting it would
+   * duplicate the specialty validation, which is the part worth having once.
+   */
+  const saveDoctor = async () => {
+    if (!hospitalId || !draftDoctor) return;
+    if (draftDoctor.full_name.trim().length < 3) {
+      setFlash({ tone: 'critical', title: 'Name required', body: 'Enter the clinician\'s full name.' });
+      return;
+    }
+    setBusy('doctor');
+    try {
+      const body = {
+        full_name: draftDoctor.full_name.trim(),
+        specialty: draftDoctor.specialty,
+        designation: draftDoctor.designation.trim() || 'Consultant',
+        registration_no: draftDoctor.registration_no.trim() || null,
+        shift_window: draftDoctor.shift_window.trim() || '08:00 – 20:00',
+        on_duty: draftDoctor.on_duty,
+        accepts_emergency: draftDoctor.accepts_emergency,
+      };
+      if (draftDoctor.id) {
+        await api.patch(`/doctors/${draftDoctor.id}`, body, { token });
+      } else {
+        await api.post(`/doctors`, { ...body, hospital_id: hospitalId }, { token });
+      }
+      setFlash({
+        tone: 'live',
+        title: draftDoctor.id ? 'Roster updated' : 'Clinician added',
+        body: `${body.full_name} is ${body.on_duty ? 'on duty now' : 'off duty'}. Dispatch sees this immediately.`,
+      });
+      setDraftDoctor(null);
+      await load(true);
+    } catch (err) {
+      setFlash({ tone: 'critical', title: 'Could not save', body: err instanceof ApiError ? err.message : undefined });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const removeDoctor = async (doctor: Doctor) => {
+    setBusy(`remove:${doctor.id}`);
+    try {
+      await api.del(`/doctors/${doctor.id}`, { token });
+      setFlash({
+        tone: 'warm',
+        title: 'Removed from the roster',
+        body: `${doctor.full_name} no longer counts towards this facility's specialist cover. Dispatcher shortlists drop them on the next rebuild.`,
+      });
+      await load(true);
+    } catch (err) {
+      setFlash({ tone: 'critical', title: 'Could not remove', body: err instanceof ApiError ? err.message : undefined });
     } finally {
       setBusy(null);
     }
@@ -239,6 +504,17 @@ export default function HospitalDashboard() {
       </AppShell>
     );
   }
+
+  /**
+   * Specialties the incident-matching chain can ask this facility for, minus the
+   * ones nobody here covers. Surfaced because an empty specialty and a busy
+   * specialty look identical from the dispatcher's side: both produce "no
+   * specialist on duty", and only one of them is fixable.
+   */
+  const covered = new Set(doctors.map((d) => d.specialty));
+  const specialtyGaps = DOCTOR_SPECIALTIES.filter(
+    (sp) => EMERGENCY_SPECIALTIES.includes(sp.value) && !covered.has(sp.value),
+  );
 
   const fresh = freshnessStatus(capacity.trust_state);
   const ageSeconds = Math.floor((Date.now() - new Date(capacity.recorded_at).getTime()) / 1000);
@@ -313,6 +589,85 @@ export default function HospitalDashboard() {
                   Inbound alert received {relativeFromIso(new Date(alert.receivedAt).toISOString())}. Prepare the
                   receiving area and confirm the bed is free.
                 </Small>
+
+                {acknowledged[alert.incident_id] ? (
+                  <Row gap="xs" align="center">
+                    <Icon
+                      name={acknowledged[alert.incident_id] === 'accepted' ? 'check' : 'x'}
+                      size={13}
+                      color={
+                        acknowledged[alert.incident_id] === 'accepted' ? t.status.live.base : t.status.warm.base
+                      }
+                    />
+                    <Small
+                      style={{ fontSize: 12, fontWeight: '600' }}
+                      muted={false}
+                    >
+                      {acknowledged[alert.incident_id] === 'accepted'
+                        ? 'Confirmed — dispatch has been told this ward is ready'
+                        : 'Declined — hold released and dispatch notified'}
+                    </Small>
+                  </Row>
+                ) : (
+                  <Row gap="xs" style={{ flexWrap: 'wrap' }}>
+                    <Button
+                      label="We can receive"
+                      icon="check"
+                      size="sm"
+                      variant="primary"
+                      loading={busy === `inbound:${alert.incident_id}`}
+                      onPress={() => answerInbound(alert, 'accepted')}
+                    />
+                    <Button
+                      label="We cannot receive"
+                      icon="x"
+                      size="sm"
+                      variant="secondary"
+                      disabled={busy === `inbound:${alert.incident_id}`}
+                      onPress={() => setAnswering(alert)}
+                    />
+                  </Row>
+                )}
+
+                {answering?.incident_id === alert.incident_id ? (
+                  <View
+                    style={{
+                      marginTop: space.xs,
+                      padding: space.md,
+                      borderRadius: 8,
+                      borderWidth: StyleSheet.hairlineWidth,
+                      borderColor: t.line.base,
+                      backgroundColor: t.bg.raised,
+                      gap: space.sm,
+                    }}
+                  >
+                    <Label>Why can this facility not receive {alert.reference}?</Label>
+                    <Small muted style={{ fontSize: 11.5 }}>
+                      The reason is recorded against this facility and, for a capacity reason, corrects the published
+                      counter — so dispatch does not offer the same bed to the next incident.
+                    </Small>
+                    <Row gap="xs" style={{ flexWrap: 'wrap' }}>
+                      {[
+                        ['no_icu', 'No ICU bed'],
+                        ['no_bed', 'No bed'],
+                        ['no_ventilator', 'No ventilator'],
+                        ['no_specialist', 'No specialist on site'],
+                        ['theatre_unavailable', 'Theatre unavailable'],
+                        ['diversion', 'On diversion'],
+                        ['other', 'Other'],
+                      ].map(([value, label]) => (
+                        <Button
+                          key={value}
+                          label={label}
+                          size="sm"
+                          variant="ghost"
+                          onPress={() => answerInbound(alert, 'declined', value)}
+                        />
+                      ))}
+                    </Row>
+                    <Button label="Cancel" size="sm" variant="ghost" onPress={() => setAnswering(null)} />
+                  </View>
+                ) : null}
               </Stack>
             ))}
           </Card>
@@ -433,21 +788,136 @@ export default function HospitalDashboard() {
               ) : null}
             </Card>
 
-            {/* Roster ------------------------------------------------------ */}
+            {/* Clinician roster --------------------------------------------- */}
+            {/*
+              The roster used to be read-only except for the on-duty switch: a
+              hospital could mark a cardiologist on duty, and could not add one,
+              correct a specialty typed wrong at onboarding, or remove somebody
+              who had left. Every clinician on the platform therefore arrived
+              through the seeder, which is why "no cardiologist on duty" was
+              indistinguishable from "nobody has ever entered the cardiologist".
+
+              Specialty is the field that matters most here — the matching chain
+              starts at the specialty the incident needs — so it is a closed
+              list rather than free text, drawn from the same catalogue the
+              dispatcher's shortlist uses.
+            */}
             <Card style={{ gap: space.md }}>
-              <Row justify="space-between" align="center">
-                <Heading>Duty roster</Heading>
-                <Pill
-                  label={`${doctors.filter((d) => d.on_duty).length} on duty`}
-                  tone="live"
-                  compact
-                />
+              <Row justify="space-between" align="center" gap="sm" style={{ flexWrap: 'wrap' }}>
+                <Stack gap="xxs">
+                  <Heading>Clinician roster</Heading>
+                  <Small muted style={{ fontSize: 12 }}>
+                    On-duty status drives the dispatcher's specialist view and the public directory.
+                  </Small>
+                </Stack>
+                <Row gap="sm" align="center">
+                  <Pill
+                    label={`${doctors.filter((d) => d.on_duty).length} of ${doctors.length} on duty`}
+                    tone={doctors.some((d) => d.on_duty) ? 'live' : 'warm'}
+                    compact
+                  />
+                  <Button label="Add clinician" icon="plus" size="sm" onPress={() => setDraftDoctor(defaultDoctor())} />
+                </Row>
               </Row>
-              <Small muted style={{ fontSize: 12 }}>
-                Toggling here updates the public doctor directory and the dispatcher's specialist view immediately.
-              </Small>
+
+              {specialtyGaps.length ? (
+                <Banner
+                  tone="warm"
+                  icon="alert"
+                  title={`${specialtyGaps.length} specialty${specialtyGaps.length === 1 ? '' : 'ies'} covered by nobody`}
+                  body={`${specialtyGaps
+                    .slice(0, 4)
+                    .map((s) => s.label)
+                    .join(', ')}${specialtyGaps.length > 4 ? ` and ${specialtyGaps.length - 4} more` : ''}. A dispatcher searching for these will not find this facility, whatever its bed count says.`}
+                />
+              ) : null}
+
+              {draftDoctor ? (
+                <View
+                  style={{
+                    padding: space.md,
+                    borderRadius: 8,
+                    borderWidth: StyleSheet.hairlineWidth,
+                    borderColor: t.accent.base,
+                    backgroundColor: t.bg.raised,
+                    gap: space.sm,
+                  }}
+                >
+                  <Label>{draftDoctor.id ? `Editing ${draftDoctor.full_name}` : 'New clinician'}</Label>
+                  <Row gap="md" wrap>
+                    <TextField
+                      label="Name"
+                      value={draftDoctor.full_name}
+                      onChangeText={(v) => setDraftDoctor((d) => ({ ...(d as DoctorDraft), full_name: v }))}
+                      style={{ flex: 2, minWidth: 180 }}
+                    />
+                    <TextField
+                      label="Registration no."
+                      value={draftDoctor.registration_no}
+                      onChangeText={(v) => setDraftDoctor((d) => ({ ...(d as DoctorDraft), registration_no: v }))}
+                      style={{ flex: 1, minWidth: 140 }}
+                    />
+                  </Row>
+                  <Row gap="md" wrap>
+                    <TextField
+                      label="Designation"
+                      value={draftDoctor.designation}
+                      onChangeText={(v) => setDraftDoctor((d) => ({ ...(d as DoctorDraft), designation: v }))}
+                      style={{ flex: 1, minWidth: 160 }}
+                    />
+                    <TextField
+                      label="Shift window"
+                      value={draftDoctor.shift_window}
+                      onChangeText={(v) => setDraftDoctor((d) => ({ ...(d as DoctorDraft), shift_window: v }))}
+                      placeholder="08:00 – 20:00"
+                      style={{ flex: 1, minWidth: 140 }}
+                    />
+                  </Row>
+
+                  <Stack gap="xs">
+                    <Label>Specialty — drives matching</Label>
+                    <Row gap="xs" style={{ flexWrap: 'wrap' }}>
+                      {DOCTOR_SPECIALTIES.map((sp) => (
+                        <Button
+                          key={sp.value}
+                          label={sp.label}
+                          size="sm"
+                          variant={draftDoctor.specialty === sp.value ? 'primary' : 'ghost'}
+                          onPress={() => {
+                            const holdsEmergency = EMERGENCY_SPECIALTIES.includes(sp.value);
+                            setDraftDoctor((d) => ({
+                              ...(d as DoctorDraft),
+                              specialty: sp.value,
+                              accepts_emergency: holdsEmergency ? (d as DoctorDraft).accepts_emergency : false,
+                            }));
+                          }}
+                        />
+                      ))}
+                    </Row>
+                  </Stack>
+
+                  <Row gap="lg" align="center" style={{ flexWrap: 'wrap' }}>
+                    <SwitchRow
+                      label="On duty now"
+                      value={draftDoctor.on_duty}
+                      onChange={(v) => setDraftDoctor((d) => ({ ...(d as DoctorDraft), on_duty: v }))}
+                    />
+                    <SwitchRow
+                      label="Accepts emergency referrals"
+                      value={draftDoctor.accepts_emergency}
+                      onChange={(v) => setDraftDoctor((d) => ({ ...(d as DoctorDraft), accepts_emergency: v }))}
+                    />
+                  </Row>
+
+                  <Row gap="xs" justify="flex-end">
+                    <Button label="Cancel" size="sm" variant="ghost" onPress={() => setDraftDoctor(null)} />
+                    <Button label="Save" size="sm" variant="primary" loading={busy === 'doctor'} onPress={saveDoctor} />
+                  </Row>
+                </View>
+              ) : null}
+
               <Stack gap={0}>
-                {doctors.slice(0, 12).map((doc, i) => (
+                {doctors.map((doc, i) => (
                   <Row
                     key={doc.id}
                     justify="space-between"
@@ -465,15 +935,28 @@ export default function HospitalDashboard() {
                       </Body>
                       <Small muted style={{ fontSize: 11.5 }} numberOfLines={1}>
                         {specialtyLabel(doc.specialty)} · {doc.designation} · {doc.shift_window}
+                        {doc.accepts_emergency ? ' · takes referrals' : ''}
                       </Small>
                     </Stack>
-                    <SwitchRow
-                      label=""
-                      value={doc.on_duty}
-                      onChange={() => toggleDuty(doc)}
+                    <SwitchRow label="" value={doc.on_duty} onChange={() => toggleDuty(doc)} />
+                    <Button label="Edit" size="sm" variant="ghost" onPress={() => setDraftDoctor(toDraft(doc))} />
+                    <Button
+                      label="Remove"
+                      size="sm"
+                      variant="ghost"
+                      loading={busy === `remove:${doc.id}`}
+                      onPress={() => removeDoctor(doc)}
                     />
                   </Row>
                 ))}
+                {doctors.length === 0 ? (
+                  <View style={{ paddingVertical: space.lg }}>
+                    <Small muted>
+                      No clinicians recorded. Dispatch will rank this facility on capacity alone, and the public
+                      directory will show no specialists on duty.
+                    </Small>
+                  </View>
+                ) : null}
               </Stack>
             </Card>
           </Stack>
@@ -533,15 +1016,15 @@ export default function HospitalDashboard() {
             <Card style={{ gap: space.sm }}>
               <SectionHeader
                 label="Holds on your beds"
-                action={<Num size={12} color={t.fg.muted}>{detail.active_holds.length}</Num>}
+                action={<Num size={12} color={t.fg.muted}>{holds.length}</Num>}
               />
-              {detail.active_holds.length === 0 ? (
+              {holds.length === 0 ? (
                 <Small muted style={{ fontSize: 12 }}>
                   No ambulance has reserved one of your beds. Holds appear here with a countdown and release
                   automatically.
                 </Small>
               ) : (
-                detail.active_holds.map((h) => (
+                holds.map((h) => (
                   <Row key={h.id} justify="space-between" align="flex-start" gap="sm">
                     <Stack gap="xs" style={{ flex: 1, minWidth: 0 }}>
                       <Row gap="xs" align="center" wrap>

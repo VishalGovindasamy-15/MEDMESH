@@ -90,7 +90,28 @@ const config: ExpoConfig = {
     output: 'single',
   },
 
-  plugins: ['expo-router', 'expo-status-bar'],
+  plugins: [
+    'expo-router',
+    'expo-status-bar',
+    // `expo-sharing` is what hands an exported CSV to the Android share sheet;
+    // without the plugin the module is not in the native build and the export
+    // path degrades to an error message.
+    'expo-sharing',
+    // Location is requested with a rationale the crew can read, and only
+    // foreground permission is asked for. The driver app reports its position
+    // while a trip is live and stops when the screen is closed -- continuous
+    // background tracking was rejected as disproportionate for the pilot, and a
+    // permission prompt that asks for more than the feature uses is how an app
+    // gets denied.
+    [
+      'expo-location',
+      {
+        locationAlwaysAndWhenInUsePermission:
+          'MedMesh shares your position with the 108 control room while you are on a call, so the dispatcher can see where the ambulance is.',
+        isAndroidBackgroundLocationEnabled: false,
+      },
+    ],
+  ],
 
   extra: {
     /** Read back by src/lib/maps.ts to decide whether to mount the native SDK view. */
