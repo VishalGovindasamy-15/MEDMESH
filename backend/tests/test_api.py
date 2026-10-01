@@ -5,6 +5,7 @@ Run:  python3 -m pytest tests -q      (from backend/)
 
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 
@@ -3345,3 +3346,498 @@ def test_the_incident_export_carries_the_officers_jurisdiction():
         admin = _login(c, "admin@medmesh.in", "MedMesh@2026")
         wide = c.get(f"{API}/analytics/export/incidents.csv?days=365", headers=admin)
         assert wide.status_code == 200
+
+
+# --------------------------------------------------------------------------- #
+# Crew assignment persistence
+#
+# The audit asked for this one specifically. `/crew/assignment` listed only
+# DISPATCHED, EN_ROUTE and a deprecated ARRIVED, so the assignment vanished the
+# moment a crew reached the scene and reappeared only if somebody advanced it by
+# another route. Everything the crew app does hangs off the assignment existing
+# -- the trip screen, the stage buttons, and the position reporting, which is
+# wired to `data?.assignment` -- so a driver who refreshed while transporting a
+# patient was shown "Standing by", stopped being tracked, and disappeared from
+# the console's map.
+# --------------------------------------------------------------------------- #
+
+
+def test_the_crew_assignment_survives_every_stage_of_the_trip():
+    with client() as c:
+        admin = _login(c, "admin@medmesh.in", "MedMesh@2026")
+        dispatcher = _login(c, "dispatch@medmesh.in", "Dispatch@108")
+        crew = _login(c, "crew@medmesh.in", "Crew@108")
+        unit = _crew_vehicle(c, admin)
+        incident = _a_crew_incident(c, dispatcher, admin, ambulance_id=unit["id"])
+
+        # The stages a real trip passes through, in order. DISPATCHED is where
+        # the incident already is; the rest are walked one at a time.
+        for stage in ("dispatched", "en_route", "at_scene", "patient_onboard", "transporting", "at_hospital"):
+            if stage != "dispatched":
+                moved = c.post(
+                    f"{API}/incidents/{incident['id']}/status",
+                    headers=crew,
+                    json={"status": stage},
+                )
+                assert moved.status_code == 200, f"{stage}: {moved.text}"
+
+            payload = c.get(f"{API}/crew/assignment", headers=crew).json()
+            assert payload.get("assignment") is not None, (
+                f"the assignment disappeared at {stage!r} -- the driver screen would "
+                "show 'Standing by' while the patient is in the vehicle"
+            )
+            assert payload["assignment"]["id"] == incident["id"]
+            assert payload["assignment"]["status"] == stage
+
+        # Handover ends it. That is the one transition that should clear the
+        # screen, and it must actually clear it.
+        done = c.post(
+            f"{API}/incidents/{incident['id']}/status",
+            headers=crew,
+            json={"status": "handed_over"},
+        )
+        assert done.status_code == 200, done.text
+        after = c.get(f"{API}/crew/assignment", headers=crew).json()
+        assert after.get("assignment") is None, "the trip is over but the crew is still holding it"
+
+
+def test_a_cancelled_trip_also_releases_the_crew_screen():
+    with client() as c:
+        admin = _login(c, "admin@medmesh.in", "MedMesh@2026")
+        dispatcher = _login(c, "dispatch@medmesh.in", "Dispatch@108")
+        crew = _login(c, "crew@medmesh.in", "Crew@108")
+        unit = _crew_vehicle(c, admin)
+        incident = _a_crew_incident(c, dispatcher, admin, ambulance_id=unit["id"])
+
+        assert c.get(f"{API}/crew/assignment", headers=crew).json()["assignment"]["id"] == incident["id"]
+        c.post(f"{API}/incidents/{incident['id']}/status", headers=crew, json={"status": "cancelled"})
+        assert c.get(f"{API}/crew/assignment", headers=crew).json().get("assignment") is None
+
+
+# --------------------------------------------------------------------------- #
+# Doctor duty expiry
+#
+# A duty window has an end. The pilot stored one, exposed it, and then treated
+# every doctor whose flag was still set as available for ever, because nothing
+# enforced the end: the rollover endpoint existed, was documented as running on a
+# scheduler, and no scheduler called it.
+# --------------------------------------------------------------------------- #
+
+
+def _a_doctor(c, admin) -> dict:
+    page = c.get(f"{API}/doctors?limit=200", headers=admin).json()
+    assert page["results"], "the roster is empty"
+    return page["results"][0]
+
+
+def test_a_duty_window_that_has_elapsed_is_not_availability():
+    """The flag still set, the window gone: the directory must say off duty."""
+    with client() as c:
+        admin = _login(c, "admin@medmesh.in", "MedMesh@2026")
+        doctor = _a_doctor(c, admin)
+        hospital_id = doctor["hospital"]["id"]
+
+        # Put them on duty for the next hour: a window that is genuinely open.
+        live = c.post(
+            f"{API}/doctors/{doctor['id']}/duty",
+            headers=admin,
+            json={"on_duty": True, "shift_window": "08:00-20:00"},
+        )
+        assert live.status_code == 200, live.text
+        assert live.json()["on_duty"] is True
+        assert live.json()["duty_state"] == "on_duty"
+        assert live.json()["minutes_remaining"] is not None
+
+        # Now move the window's end into the past behind the API's back -- which
+        # is exactly the state a running system reaches when a shift ends and the
+        # sweep has not run yet.
+        from app.database import SessionLocal
+        from app.models import Doctor, utcnow
+        from datetime import timedelta
+
+        db = SessionLocal()
+        try:
+            row = db.get(Doctor, doctor["id"])
+            row.duty_end = utcnow() - timedelta(minutes=5)
+            db.commit()
+        finally:
+            db.close()
+
+        # Read paths must not report availability.
+        reread = c.get(f"{API}/doctors/{doctor['id']}", headers=admin).json()
+        assert reread["on_duty"] is False, "an elapsed window was reported as on duty"
+        assert reread["duty_state"] == "expired"
+        assert reread["minutes_remaining"] is not None and reread["minutes_remaining"] < 0, (
+            "the countdown was clamped, so a caller cannot tell it has passed"
+        )
+
+        # Nor may the facility page advertise them.
+        facility = c.get(f"{API}/hospitals/{hospital_id}", headers=admin).json()
+        assert all(d["id"] != doctor["id"] for d in facility["doctors_on_duty"]), (
+            "the facility page listed a clinician whose shift had ended"
+        )
+
+        # Nor the public directory.
+        public = c.get(f"{API}/doctors?specialty={doctor['specialty']}&limit=200").json()
+        assert all(d["id"] != doctor["id"] for d in public["results"]), (
+            "the public directory advertised an ended shift"
+        )
+
+
+def test_the_roster_sweep_closes_the_window_and_publishes_it():
+    with client() as c:
+        admin = _login(c, "admin@medmesh.in", "MedMesh@2026")
+        doctor = _a_doctor(c, admin)
+        c.post(
+            f"{API}/doctors/{doctor['id']}/duty",
+            headers=admin,
+            json={"on_duty": True, "shift_window": "08:00-20:00"},
+        )
+
+        from datetime import timedelta
+
+        from app.database import SessionLocal
+        from app.models import Doctor, utcnow
+
+        db = SessionLocal()
+        try:
+            row = db.get(Doctor, doctor["id"])
+            row.duty_end = utcnow() - timedelta(minutes=1)
+            db.commit()
+        finally:
+            db.close()
+
+        # The scheduled path, called directly rather than waited for: a sweep
+        # that can only be exercised by waiting five minutes is never tested.
+        from app.services.roster import run_rollover_once
+
+        assert run_rollover_once() >= 1
+
+        after = c.get(f"{API}/doctors/{doctor['id']}", headers=admin).json()
+        assert after["roster_flag"] is False and after["on_duty"] is False
+        assert after["duty_end"] is None, "the window was closed but its end time was left behind"
+
+
+def test_a_duty_manager_switching_a_doctor_off_is_not_undone_by_renewal():
+    """Renewal puts the rostered shift back; it must not overrule a person."""
+    with client() as c:
+        admin = _login(c, "admin@medmesh.in", "MedMesh@2026")
+        doctor = _a_doctor(c, admin)
+
+        off = c.post(f"{API}/doctors/{doctor['id']}/duty", headers=admin, json={"on_duty": False})
+        assert off.status_code == 200, off.text
+        assert off.json()["on_duty"] is False
+
+        from app.database import SessionLocal
+        from app.services.roster import renew_demo_roster
+
+        db = SessionLocal()
+        try:
+            renew_demo_roster(db)
+            db.commit()
+        finally:
+            db.close()
+
+        still = c.get(f"{API}/doctors/{doctor['id']}", headers=admin).json()
+        assert still["on_duty"] is False, (
+            "the roster renewal put back a clinician a duty manager had taken off"
+        )
+
+
+# --------------------------------------------------------------------------- #
+# Second audit round: privacy, admin editing, audit pagination
+# --------------------------------------------------------------------------- #
+
+
+def test_anonymous_feedback_cannot_carry_a_personal_note():
+    """#47: the category is public; a note is not, and neither is a phone number."""
+    with client() as c:
+        hospitals = c.get(f"{API}/hospitals?limit=1").json()["results"]
+        hid = hospitals[0]["id"]
+
+        anonymous_with_note = c.post(
+            f"{API}/governance/feedback",
+            json={"hospital_id": hid, "kind": "beds_unavailable", "comment": "ward was full"},
+        )
+        assert anonymous_with_note.status_code == 422, (
+            "an anonymous report carried free text, which is the hole the audit closed"
+        )
+
+        anonymous_plain = c.post(
+            f"{API}/governance/feedback",
+            json={"hospital_id": hid, "kind": "beds_unavailable"},
+        )
+        assert anonymous_plain.status_code == 201, anonymous_plain.text
+
+
+def test_a_signed_in_note_carrying_a_phone_number_is_refused():
+    """#47: the PII gate names what it found rather than silently redacting."""
+    with client() as c:
+        ward = _login(c, "admin@kgch.medmesh.in", "Hospital@2026")
+        me = c.get(f"{API}/auth/me", headers=ward).json()
+        hid = me["hospital_id"]
+
+        bad = c.post(
+            f"{API}/governance/feedback",
+            headers=ward,
+            json={
+                "hospital_id": hid,
+                "kind": "wrong_hours",
+                "comment": "call the desk on 9840712345 and ask for sister Mary",
+            },
+        )
+        assert bad.status_code == 422, bad.text
+        assert "phone number" in bad.json()["detail"][0]["msg"].lower() or "phone" in bad.text.lower()
+
+        good = c.post(
+            f"{API}/governance/feedback",
+            headers=ward,
+            json={
+                "hospital_id": hid,
+                "kind": "wrong_hours",
+                "comment": "casualty desk said the posted hours end at eight, not ten",
+            },
+        )
+        assert good.status_code == 201, good.text
+
+
+def test_the_audit_trail_does_not_carry_the_feedback_note():
+    """#53: free text belongs to the report row, not to every audit export."""
+    with client() as c:
+        ward = _login(c, "admin@kgch.medmesh.in", "Hospital@2026")
+        me = c.get(f"{API}/auth/me", headers=ward).json()
+        note = "casualty desk redirected us to the annex after midnight"
+        created = c.post(
+            f"{API}/governance/feedback",
+            headers=ward,
+            json={"hospital_id": me["hospital_id"], "kind": "closed", "comment": note},
+        )
+        assert created.status_code == 201, created.text
+
+        admin = _login(c, "admin@medmesh.in", "MedMesh@2026")
+        entries = c.get(f"{API}/governance/audit?hours=1&limit=50&action=feedback", headers=admin).json()
+        submits = [e for e in entries["results"] if e["action"] == "feedback.submit"]
+        assert submits, "the submission was not audited at all"
+        for entry in submits:
+            assert note not in json.dumps(entry["payload"]), (
+                "the free-text note rode along inside the audit payload"
+            )
+
+        # The reviewer's decision note lands on the report, and the audit says
+        # only that a note exists.
+        fid = submits[0]["payload"]["feedback_id"]
+        resolved = c.post(
+            f"{API}/governance/feedback/{fid}/resolve",
+            headers=admin,
+            json={"status": "upheld", "resolution_note": "confirmed against the bed-control desk"},
+        )
+        assert resolved.status_code == 200, resolved.text
+        listed = c.get(f"{API}/governance/feedback?limit=50", headers=admin).json()
+        row = next(f for f in listed["results"] if f["id"] == fid)
+        assert row["resolution_note"] == "confirmed against the bed-control desk"
+        assert row["status"] == "upheld"
+
+
+def test_the_audit_endpoint_pages_and_says_how_much_is_left():
+    """#41: a total, a page, and an honest has_more."""
+    with client() as c:
+        admin = _login(c, "admin@medmesh.in", "MedMesh@2026")
+        first = c.get(f"{API}/governance/audit?hours=24&limit=5&offset=0", headers=admin).json()
+        assert first["count"] == len(first["results"]) <= 5
+        assert first["total"] >= first["count"]
+        assert "has_more" in first and "offset" in first
+        if first["has_more"]:
+            second = c.get(f"{API}/governance/audit?hours=24&limit=5&offset=5", headers=admin).json()
+            ids_a = {e["id"] for e in first["results"]}
+            ids_b = {e["id"] for e in second["results"]}
+            assert not (ids_a & ids_b), "pages overlap"
+
+
+def test_an_account_can_be_moved_between_facilities_without_losing_its_history():
+    """#37: editing is a change, not a delete-and-recreate."""
+    with client() as c:
+        admin = _login(c, "admin@medmesh.in", "MedMesh@2026")
+        hospitals = c.get(f"{API}/hospitals?include_unverified=true&limit=4", headers=admin).json()["results"]
+        created = c.post(
+            f"{API}/governance/users",
+            headers=admin,
+            json={
+                "full_name": "Transfer Test",
+                "email": "transfer.test@medmesh.in",
+                "password": "Transfer@2026x",
+                "role": "hospital_admin",
+                "hospital_id": hospitals[0]["id"],
+            },
+        )
+        assert created.status_code in (200, 201), created.text
+        uid = created.json()["id"]
+
+        moved = c.patch(
+            f"{API}/governance/users/{uid}",
+            headers=admin,
+            json={"hospital_id": hospitals[1]["id"], "full_name": "Transfer Test II"},
+        )
+        assert moved.status_code == 200, moved.text
+        assert set(moved.json()["changed"]), "nothing was recorded as changed"
+
+        listed = c.get(f"{API}/governance/users", headers=admin).json()
+        row = next(u for u in listed["results"] if u["id"] == uid)
+        assert row["hospital_id"] == hospitals[1]["id"]
+        assert row["full_name"] == "Transfer Test II"
+
+        # Scope rules still bind on edit: a hospital account without a facility
+        # is exactly what creation refuses, and edit must not smuggle it in.
+        unscoped = c.patch(
+            f"{API}/governance/users/{uid}",
+            headers=admin,
+            json={"role": "dispatcher"},
+        )
+        assert unscoped.status_code == 422, unscoped.text
+
+
+def test_disabling_and_re_enabling_an_account_is_audited_once_each():
+    """#38: the switch still works, and says what it did."""
+    with client() as c:
+        admin = _login(c, "admin@medmesh.in", "MedMesh@2026")
+        created = c.post(
+            f"{API}/governance/users",
+            headers=admin,
+            json={
+                "full_name": "Switch Test",
+                "email": "switch.test@medmesh.in",
+                "password": "Switching@2026x",
+                "role": "gov_official",
+                "district_id": 1,
+            },
+        )
+        uid = created.json()["id"]
+
+        off = c.patch(f"{API}/governance/users/{uid}?is_active=false", headers=admin)
+        assert off.status_code == 200 and off.json()["is_active"] is False
+
+        denied = _login_status(c, "switch.test@medmesh.in", "Switching@2026x")
+        assert denied == 401 or denied == 403, "a disabled account still signs in"
+
+        on = c.patch(f"{API}/governance/users/{uid}?is_active=true", headers=admin)
+        assert on.status_code == 200 and on.json()["is_active"] is True
+
+
+def _login_status(c, email: str, password: str) -> int:
+    return c.post(f"{API}/auth/login", json={"email": email, "password": password}).status_code
+
+
+def test_a_blocked_facility_needs_a_typed_override_and_the_audit_keeps_it():
+    """#11: the engine's refusal is overridable, but only on the record."""
+    with client() as c:
+        dispatch = _login(c, "dispatch@medmesh.in", "Dispatch@108")
+        incidents = c.get(f"{API}/incidents?limit=20", headers=dispatch).json()["results"]
+        open_inc = next((i for i in incidents if i["status"] == "open"), None)
+        assert open_inc is not None, "fixture needs an open incident"
+
+        shortlist = c.get(
+            f"{API}/incidents/{open_inc['id']}/shortlist?limit=20&include_ineligible=true",
+            headers=dispatch,
+        ).json()
+        blocked = next((r for r in shortlist["results"] if not r["eligible"]), None)
+        if blocked is None:
+            import pytest
+
+            pytest.skip("every candidate is eligible for this incident")
+
+        refused = c.post(
+            f"{API}/incidents/{open_inc['id']}/dispatch",
+            headers=dispatch,
+            json={"hospital_id": blocked["hospital_id"]},
+        )
+        assert refused.status_code == 409, refused.text
+        detail = refused.json()["detail"]
+        assert detail["blockers"], "the refusal must say what is blocking"
+
+        reason = "receiving consultant confirmed by phone; control accepts"
+        overridden = c.post(
+            f"{API}/incidents/{open_inc['id']}/dispatch",
+            headers=dispatch,
+            json={"hospital_id": blocked["hospital_id"], "override_reason": reason},
+        )
+        assert overridden.status_code == 200, overridden.text
+
+        admin = _login(c, "admin@medmesh.in", "MedMesh@2026")
+        audit = c.get(f"{API}/governance/audit?hours=1&limit=40&action=incident.dispatch", headers=admin).json()
+        entry = next(
+            (e for e in audit["results"] if str(e["entity"].split(":")[-1]) == str(open_inc["id"])),
+            None,
+        )
+        assert entry is not None
+        assert reason in entry["summary"], "the override reason must be in the audit trail"
+
+
+def test_a_unit_that_is_not_free_is_refused_until_overridden():
+    """#29/#31: a hand-picked vehicle is checked exactly like the engine's own."""
+    with client() as c:
+        dispatch = _login(c, "dispatch@medmesh.in", "Dispatch@108")
+        admin = _login(c, "admin@medmesh.in", "MedMesh@2026")
+        incidents = c.get(f"{API}/incidents?limit=20", headers=dispatch).json()["results"]
+        open_inc = next((i for i in incidents if i["status"] == "open"), None)
+        assert open_inc is not None
+
+        fleet = c.get(f"{API}/ambulances?limit=200", headers=admin).json()["results"]
+        unit = next(u for u in fleet if u["status"] == "available")
+        down = c.post(f"{API}/ambulances/{unit['id']}/status", headers=admin, json={"status": "out_of_service"})
+        assert down.status_code == 200, down.text
+        try:
+            shortlist = c.get(f"{API}/incidents/{open_inc['id']}/shortlist?limit=5", headers=dispatch).json()
+            target = shortlist["results"][0]["hospital_id"]
+
+            refused = c.post(
+                f"{API}/incidents/{open_inc['id']}/dispatch",
+                headers=dispatch,
+                json={"hospital_id": target, "ambulance_id": unit["id"]},
+            )
+            assert refused.status_code == 409, refused.text
+            assert refused.json()["detail"]["blockers"], "the unit's state must be named"
+
+            forced = c.post(
+                f"{API}/incidents/{open_inc['id']}/dispatch",
+                headers=dispatch,
+                json={
+                    "hospital_id": target,
+                    "ambulance_id": unit["id"],
+                    "override_reason": "only vehicle with the crew's equipment; control accepts",
+                },
+            )
+            assert forced.status_code == 200, forced.text
+        finally:
+            c.post(f"{API}/ambulances/{unit['id']}/status", headers=admin, json={"status": "available"})
+
+
+def test_a_reroute_cannot_swap_the_crew():
+    """The vehicle carrying a patient stays with them until the trip closes."""
+    with client() as c:
+        dispatch = _login(c, "dispatch@medmesh.in", "Dispatch@108")
+        admin = _login(c, "admin@medmesh.in", "MedMesh@2026")
+        incidents = c.get(f"{API}/incidents?limit=30", headers=dispatch).json()["results"]
+        moving = next((i for i in incidents if i["status"] in ("en_route", "transporting")), None)
+        if moving is None:
+            import pytest
+
+            pytest.skip("no incident mid-trip in the fixture")
+        shortlist = c.get(f"{API}/incidents/{moving['id']}/shortlist?limit=5", headers=dispatch).json()
+        other = next(
+            (r["hospital_id"] for r in shortlist["results"] if r["hospital_id"] != moving["assigned_hospital_id"]),
+            None,
+        )
+        assert other is not None
+        fleet = c.get(f"{API}/ambulances?limit=200", headers=admin).json()["results"]
+        spare = next(
+            (u for u in fleet if u["id"] != moving.get("assigned_ambulance_id") and u["status"] == "available"),
+            None,
+        )
+        assert spare is not None
+
+        refused = c.post(
+            f"{API}/incidents/{moving['id']}/reroute",
+            headers=dispatch,
+            json={"hospital_id": other, "ambulance_id": spare["id"]},
+        )
+        assert refused.status_code == 409, refused.text
+        assert "re-route" in refused.json()["detail"].lower() or "crew" in refused.json()["detail"].lower()

@@ -21,6 +21,7 @@ import { View } from 'react-native';
 
 import { api, ApiError } from '../../src/api/client';
 import type { Ambulance, District, Facility, FleetDirectory } from '../../src/api/types';
+import { relativeFromIso } from '../../src/lib/format';
 import { useAuth } from '../../src/state/AuthProvider';
 import { useTheme } from '../../src/theme/ThemeProvider';
 import { space } from '../../src/theme/tokens';
@@ -28,6 +29,7 @@ import {
   Banner,
   Button,
   Card,
+  ConfirmDialog,
   Divider,
   EmptyState,
   Heading,
@@ -76,7 +78,17 @@ type Flash = (f: { tone: 'live' | 'warm' | 'critical'; title: string; body?: str
  * `KeyValue` renders a label and a right-aligned value; this wrapper spells out
  * the monospace case so a figure is not formatted by hand at every call site.
  */
-function KV({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
+function KV({
+  label,
+  value,
+  mono,
+  tone,
+}: {
+  label: string;
+  value: string;
+  mono?: boolean;
+  tone?: 'warn';
+}) {
   const { t } = useTheme();
   return (
     <View style={{ minWidth: 150 }}>
@@ -86,7 +98,7 @@ function KV({ label, value, mono }: { label: string; value: string; mono?: boole
       {mono ? (
         <Num size={12.5}>{value}</Num>
       ) : (
-        <Small>{value}</Small>
+        <Small style={tone === 'warn' ? { color: t.status.warm.base } : undefined}>{value}</Small>
       )}
     </View>
   );
@@ -112,6 +124,9 @@ export function FleetPanel({
   const [adding, setAdding] = useState(false);
   const [form, setForm] = useState({ ...EMPTY_FORM });
   const [editing, setEditing] = useState<Ambulance | null>(null);
+  // #39: releasing a crew account makes the vehicle undispatchable, which in a
+  // live district is a decision, not a click. The dialog states what it costs.
+  const [releasing, setReleasing] = useState<Ambulance | null>(null);
   const [busy, setBusy] = useState<number | 'new' | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -482,6 +497,7 @@ export function FleetPanel({
                   busy={busy === unit.id}
                   onStatus={setStatus}
                   onAssign={assignDriver}
+                  onRelease={(u) => setReleasing(u)}
                   onEdit={() => setEditing(unit)}
                 />
               ))}
@@ -502,6 +518,21 @@ export function FleetPanel({
           onFlash={onFlash}
         />
       ) : null}
+
+      <ConfirmDialog
+        visible={releasing !== null}
+        tone="danger"
+        title={releasing ? `Release ${releasing.driver?.full_name ?? 'crew'} from ${releasing.call_sign}?` : 'Release crew'}
+        body="The vehicle becomes undispatchable until another crew account is linked to it. If it is on a live trip the crew keeps the assignment they are working, but the next call cannot go to this unit."
+        confirmLabel="Release crew"
+        busy={releasing ? busy === releasing.id : false}
+        onConfirm={() => {
+          const unit = releasing;
+          setReleasing(null);
+          if (unit) void assignDriver(unit, null);
+        }}
+        onCancel={() => setReleasing(null)}
+      />
     </Stack>
   );
 }
@@ -515,6 +546,7 @@ function UnitRow({
   busy,
   onStatus,
   onAssign,
+  onRelease,
   onEdit,
 }: {
   unit: Ambulance;
@@ -523,12 +555,22 @@ function UnitRow({
   busy: boolean;
   onStatus: (u: Ambulance, s: string) => void;
   onAssign: (u: Ambulance, id: number | null) => void;
+  onRelease: (u: Ambulance) => void;
   onEdit: () => void;
 }) {
   const { t } = useTheme();
   const [picking, setPicking] = useState(false);
   const outOfService = unit.status === 'out_of_service';
   const [showAll, setShowAll] = useState(false);
+
+  // Stale GPS. A vehicle that has not reported for more than ten minutes is a
+  // vehicle whose position on the map may be a lie, and dispatching to it is how
+  // an ETA gets promised off a coordinate nobody has confirmed since morning.
+  const gpsStale = useMemo(() => {
+    if (!unit.updated_at) return false;
+    const ms = Date.now() - new Date(unit.updated_at).getTime();
+    return !Number.isNaN(ms) && ms > 10 * 60 * 1000;
+  }, [unit.updated_at]);
 
   /**
    * Driver choices, drivers with no vehicle first.
@@ -584,7 +626,17 @@ function UnitRow({
         <KV label="Base" value={districtName} />
         <KV label="Operator" value={`${unit.operator_name} (${unit.operator_type})`} />
         <KV label="Driver" value={unit.driver?.full_name ?? 'Not linked'} />
-        {unit.updated_at ? <KV label="Position seen" value={unit.updated_at} mono /> : null}
+        {/* #40: this printed the raw ISO timestamp, so a vehicle whose position
+            had not moved since the previous afternoon read the same as one
+            reporting every twenty seconds — you had to do the arithmetic against
+            the current time to tell. The age is what a fleet office acts on. */}
+        {unit.updated_at ? (
+          <KV
+            label="Last position"
+            value={relativeFromIso(unit.updated_at)}
+            tone={gpsStale ? 'warn' : undefined}
+          />
+        ) : null}
       </Row>
 
       {picking ? (
@@ -596,7 +648,7 @@ function UnitRow({
                 {unit.driver.full_name} is currently linked. Releasing them leaves the vehicle
                 undispatchable until somebody else is linked.
               </Small>
-              <Button size="sm" variant="danger" label="Release crew" onPress={() => onAssign(unit, null)} />
+              <Button size="sm" variant="danger" label="Release crew" onPress={() => onRelease(unit)} />
             </Row>
           ) : null}
 

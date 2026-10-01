@@ -124,6 +124,31 @@ export function FacilityRow({
             {cap.holds_active > 0 ? (
               <Pill label={`${cap.holds_active} held`} tone="info" compact icon="lock" />
             ) : null}
+            {/* Specialist cover, which the row never carried. Beds and ICU say
+                how much room a facility has; they say nothing about whether
+                anyone there can treat the patient, and for a snakebite at
+                midnight that is the question. Named specialties rather than a
+                count, so the row answers "do they have what this needs". */}
+            {facility.doctors && !compact ? (
+              facility.doctors.on_duty > 0 ? (
+                <Pill
+                  label={
+                    facility.doctors.specialties.length
+                      ? `On duty: ${facility.doctors.specialties.slice(0, 2).join(', ')}${
+                          facility.doctors.specialties.length > 2 ? ` +${facility.doctors.specialties.length - 2}` : ''
+                        }`
+                      : `${facility.doctors.on_duty} on duty`
+                  }
+                  tone="live"
+                  compact
+                  icon="pulse"
+                />
+              ) : facility.doctors.withheld ? (
+                <Pill label="roster withheld" tone="neutral" compact outline icon="lock" />
+              ) : (
+                <Pill label="no clinician on duty" tone="warm" compact icon="alert" />
+              )
+            ) : null}
           </Row>
 
           {(capages.trauma_centre || capages.blood_bank || capages.burn_unit || capages.cath_lab) && !compact ? (

@@ -277,14 +277,110 @@ eight stages of a trip rather than the first three.
 
 ---
 
-## 5. Verification
+## 5. The second audit — `problem_new.pdf`
+
+The second review arrived as 54 numbered findings with severities, plus a
+70-step prioritised plan and a release-hygiene section. Every one of them is
+tracked in `AUDIT-CHECKLIST.md`, row by row, with the verification that closed
+it; this section summarises what changed and how it was proven. 53 of the 54
+findings are fixed and verified in this repository. The remaining four plan
+items (MFA, rate limiting, secure token storage, session/device controls) are
+recorded as production hardening, deliberately out of pilot scope, with the
+reason on the checklist row.
+
+**How the pass was run.** The PDF's own plan became the work order: emergency
+workflow first, then availability truth, then the shared pickers, mobile
+navigation, maps, inbox, admin, privacy, and release hygiene last. Each phase
+ended in a verification step before the next began — either a backend test or a
+browser harness assertion, never "looks right in the browser".
+
+**Phase 1, emergency workflow.** The dispatcher's incident workspace gained the
+crew half of the decision: a ranked unit list (capability match → free → crewed
+→ distance), a unit preview with registration, operator, linked crew, status and
+GPS-fix age, a manual picker of every unit in scope, and a confirmation step in
+front of every commit. Overriding the engine — or requiring a unit that is not
+free — is a typed-reason dialog, and the reason lands in the audit trail against
+the operator's account. Committing with no free unit anywhere no longer echoes
+the engine's verbatim line: the console re-reads the fleet and rebuilds the
+sentence with real counts, picker open beside it. The queue gained a fleet
+board: stage counts, a schematic fleet map coloured by trip stage with the
+freshness ring explained, and GPS age on every row.
+
+**Phase 2, availability truth.** Duty is now computed on read everywhere
+(`duty_state`, signed `minutes_remaining`), the roster sweep runs on a loop, and
+the roster editor's rows carry the same presence badge the public directory
+shows — including the awkward case where the stored flag is still up after the
+window closed, which the row now says out loud. Shift windows are a picker of
+six patterns; the free-text box that produced unparseable rosters is gone.
+
+**Phase 3, one picker everywhere.** `DistrictPicker`/`FacilityPicker` are the
+only facility choosers left: the admin account form (which used to expose 14 of
+152 facilities with no hint there were more), the connector form (152 chips in a
+horizontal scroll), and the directory's own district control all use them. The
+picker searches name, code and district, offers district chips with counts, and
+states when it is showing a subset. The ICU facet count is computed over the
+list the facet will act on, and every filter chip now carries a count.
+
+**Phase 4, mobile and confirmations.** The phone shell keeps four primary
+destinations plus a "More" sheet that reaches Account, Analytics and
+Operations. The directory opens list-first on a phone. Every destructive or
+consequential action — disable account, release crew, activate or stand down a
+surge, commit, re-route — now passes through one shared confirmation component;
+the override variant refuses to fire until a reason of at least twelve
+characters exists.
+
+**Phase 5, maps.** The keyed map fits its camera to whatever it is showing and
+re-fits when the set changes, clusters pins by screen distance with count
+labels and worst-state colour, and draws freshness as the pin outline so
+capacity and report age stay two separate statements. The schematic fallback
+gained the same split in its legend. The tap instruction matches the gesture on
+each platform.
+
+**Phase 6, inbox into workflow.** A ward's inbound alert carries "Review
+inbound case" into the dashboard with the queue highlighted; a crew alert
+carries "Open assignment" into the crew screen. Answering an alert marks it read
+and attributed, so unread counts stop counting handled work.
+
+**Phase 7, admin.** Accounts are editable in place — name, email, role,
+facility, district, vehicle — with the creation scope rules re-enforced on every
+edit and vehicle re-linking releasing the previous crew in the same transaction.
+Fleet rows show GPS age instead of a raw timestamp. The audit trail pages with
+an honest total. Complaints close through a real decision: upheld, dismissed or
+under review, with the reviewer's note stored on the report.
+
+**Phase 8, privacy.** Anonymous feedback carries the category only. Signed-in
+notes are short and refused — not silently redacted — when they match a phone
+number, an email, a digit run, an age or a named patient. The audit trail no
+long carries free text: the note lives on the report, the audit carries ids,
+kind and decision.
+
+**Phase 9, release hygiene and verification.** `tools/package-release.sh`
+stages a source-only archive and refuses to zip it if any of `.env`, `*.db*`,
+`node_modules`, `.expo`, `.android`, `dist`, `dist-gmaps` or a keystore
+survives; `.env.example` is asserted present. The verification matrix at the end
+of this report is the closing evidence for the phase.
+
+**Bugs the pass uncovered that were not in the PDF.** The demo control-room
+loop logged a shortlist key that never existed, so every simulated commit ran
+silently with its log line swallowed by the tick's own exception handler. The
+re-route endpoint silently ignored a client-sent crew id — a console could
+believe it had re-crewed a moving vehicle; it now refuses with the reason, and
+the console only sends the crew choice on the commit path. A declined-facility
+re-route refusal surfaced as a bare error banner instead of the override dialog
+its own payload described.
+
+## 6. Verification
 
 ```bash
-cd backend  && python3 -m pytest tests -q      # 70 passed
-cd mobile   && npx tsc --noEmit                # clean
-cd tools/qa && node sweep.mjs                  # 32 route × viewport, 0 problems
-cd tools/qa && node surfaces.mjs               # all surfaces verified
-cd tools/qa && node maps.mjs                   # Google Maps integration verified
+cd backend  && python3 -m pytest tests -q            # 83 passed, 1 skipped
+cd mobile   && npx tsc --noEmit                      # clean
+cd tools/qa && node sweep.mjs                        # 32 route × viewport, 0 problems
+cd tools/qa && node surfaces.mjs                     # all surfaces verified
+cd tools/qa && node maps.mjs                         # Google Maps integration verified
+cd tools/qa && node probe-admin.mjs                  # admin panel verified
+cd tools/qa && node probe-console-crew.mjs           # console crew workflow verified
+cd tools/qa && node probe-inbox-shell.mjs            # inbox and shell verified
+./tools/package-release.sh                           # source-only archive, or refuses
 ```
 
 The API suite covers the paths that matter operationally, not line coverage:
@@ -308,6 +404,18 @@ map labels its facilities, each shortlist candidate says whether its ETA came of
 the road network, both CSV exports produce an actual file, and no uncaught
 console error occurs anywhere in the run.
 
+The second audit added three focused harnesses. `probe-console-crew.mjs` works
+the dispatcher's crew workflow end to end — picker, preview, confirmation, the
+stand-the-fleet-down state — and plants its own outages through the fleet API,
+restoring them in a `finally` so a crash can never leave the pilot fleet stood
+down. `probe-admin.mjs` asserts each admin fix against the behaviour the audit
+described: a searchable 152-facility selector, an audit window that says how much
+is left, a complaint form that asks what the reviewer found. `probe-inbox-shell.mjs`
+covers the inbox-to-workflow handoffs and the two shell statements — "Pilot
+dataset", and the separation of connection state from data age. The Google Maps
+harness grew assertions for camera fit and clustering, checked against a stub
+that records what the map was asked to do.
+
 Four of the audit's findings were caught by these harnesses rather than by
 reading, and two of the harness failures were bugs in the harness — a ward
 session asserting on another facility's screen, and a crew fixture that assumed a
@@ -317,7 +425,7 @@ stay wrong.
 
 ---
 
-## 6. Continuous integration
+## 7. Continuous integration
 
 `.github/workflows/ci.yml` runs three jobs on push and pull request:
 
@@ -339,7 +447,7 @@ caught any of them.
 
 ---
 
-## 7. Android build
+## 8. Android build
 
 `ANDROID_BUILD.md` covers EAS Build and the local Gradle path. Verified by
 running: `expo prebuild` generates `android/` with package `in.medmesh.app`; the
@@ -355,7 +463,7 @@ otherwise. EAS Build is the recommended route and produces a signed artefact.
 
 ---
 
-## 8. Known limitations
+## 9. Known limitations
 
 Recorded rather than discovered later.
 
@@ -392,11 +500,14 @@ Recorded rather than discovered later.
 - **No rate limiting, MFA or lockout.** `auth.py` notes where the API gateway
   takes over.
 - **Operational consoles are English-only**, per the safety argument above.
-- **Facility data is synthetic.** See §2.
+- **Facility data is synthetic.** See §2. Since the second audit it is also
+  labelled: every shell carries a "Pilot dataset" strip stating the figures are
+  simulated and describe no real patient or facility, fetched from the
+  unauthenticated status endpoint so it shows before sign-in as well as after.
 
 ---
 
-## 9. Repository
+## 10. Repository
 
 Initialised locally with one commit, 182 files, `.gitignore` covering build
 artefacts, databases, native projects and credentials. A sanity check confirms no
@@ -413,7 +524,7 @@ git branch -M main
 git push -u origin main
 ```
 
-## 10. Running it
+## 11. Running it
 
 ```bash
 cd backend && bash setup.sh && python3 -m uvicorn app.main:app --port 8000

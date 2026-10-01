@@ -35,6 +35,7 @@ import { useResponsive } from '../../src/ui/useResponsive';
 import { MapSurface } from '../../src/components/MapSurface';
 import { toMapPoints } from '../../src/components/mapTypes';
 import { ReportSheet } from '../../src/components/ReportSheet';
+import { DoctorPresence } from '../../src/components/DutyPresence';
 
 export default function FacilityScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
@@ -47,6 +48,8 @@ export default function FacilityScreen() {
   const [detail, setDetail] = useState<FacilityDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [reporting, setReporting] = useState(false);
+  /** The roster truncates at 8 for density; the rest is one press away. */
+  const [doctorsExpanded, setDoctorsExpanded] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -224,33 +227,49 @@ export default function FacilityScreen() {
           {/* Left column ------------------------------------------------ */}
           <Stack gap="lg" style={{ flex: 1, minWidth: isDesktop ? 340 : '100%' }}>
             <Card style={{ gap: space.md }}>
-              <Heading>Doctors on duty</Heading>
+              <Row justify="space-between" align="center" gap="sm" style={{ flexWrap: 'wrap' }}>
+                <Heading>Doctors on duty now</Heading>
+                {/* The count, stated. "8 shown" and "12 on the roster" are
+                    different facts and the card used to render the first as
+                    though it were the second. */}
+                <Pill
+                  label={
+                    detail.doctors_on_duty.length === 0
+                      ? 'nobody on shift'
+                      : `${detail.doctors_on_duty.length} on duty · ${
+                          detail.doctors_on_duty.filter((d) => d.accepts_emergency).length
+                        } take emergency`
+                  }
+                  tone={detail.doctors_on_duty.length ? 'live' : 'warm'}
+                  compact
+                />
+              </Row>
               {detail.doctors_on_duty.length === 0 ? (
                 <Small muted>
                   No roster is published for this facility. Call the emergency desk to confirm specialist cover.
                 </Small>
               ) : (
                 <Stack gap="sm">
-                  {detail.doctors_on_duty.slice(0, 8).map((doc) => (
-                    <Row key={doc.id} justify="space-between" align="center" gap="md">
-                      <Stack gap="xxs" style={{ flex: 1, minWidth: 0 }}>
-                        <Body style={{ fontWeight: '600', fontSize: 13.5 }}>{doc.full_name}</Body>
-                        <Small muted style={{ fontSize: 12 }}>
-                          {specialtyLabel(doc.specialty)} · {doc.designation}
-                        </Small>
-                      </Stack>
-                      <Stack gap="xxs" align="flex-end">
-                        <Pill label={doc.shift} tone="neutral" compact outline />
-                        {doc.accepts_emergency ? (
-                          <Label style={{ fontSize: 9.5 }} tone={t.status.live.base}>
-                            takes emergency
-                          </Label>
-                        ) : null}
-                      </Stack>
-                    </Row>
+                  {(doctorsExpanded ? detail.doctors_on_duty : detail.doctors_on_duty.slice(0, 8)).map((doc) => (
+                    <DoctorPresence
+                      key={doc.id}
+                      name={doc.full_name}
+                      speciality={specialtyLabel(doc.specialty)}
+                      designation={doc.designation}
+                      doctor={doc}
+                    />
                   ))}
                   {detail.doctors_on_duty.length > 8 ? (
-                    <Small muted>+ {detail.doctors_on_duty.length - 8} more on the roster</Small>
+                    <Button
+                      label={
+                        doctorsExpanded
+                          ? 'Show fewer'
+                          : `View all ${detail.doctors_on_duty.length} doctors`
+                      }
+                      size="sm"
+                      variant="ghost"
+                      onPress={() => setDoctorsExpanded((v) => !v)}
+                    />
                   ) : null}
                 </Stack>
               )}

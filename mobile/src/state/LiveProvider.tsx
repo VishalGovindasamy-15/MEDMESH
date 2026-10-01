@@ -1,7 +1,7 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { AppState, Platform } from 'react-native';
 
-import { wsUrl } from '../api/client';
+import { api, wsUrl } from '../api/client';
 import type { Capacity, TrustVerdict } from '../api/types';
 import { useAuth } from './AuthProvider';
 
@@ -45,6 +45,16 @@ export interface LiveEvent {
 
 interface LiveValue {
   connected: boolean;
+  /**
+   * Unread notifications, for the navigation badge.
+   *
+   * Counted from the socket where possible -- a notification arriving is the
+   * event that should move the badge -- and reconciled against the API's own
+   * count on connect, because a socket that was down while three alerts were
+   * written cannot know about them. Opening the inbox clears it.
+   */
+  unread: number;
+  refreshUnread: () => void;
   degraded: boolean;
   lastEventAt: number | null;
   facilities: Record<number, LiveFacility>;
@@ -65,6 +75,7 @@ export function LiveProvider({ children }: { children: React.ReactNode }) {
   const [facilities, setFacilities] = useState<Record<number, LiveFacility>>({});
   const [touched, setTouched] = useState<Record<number, number>>({});
   const [tick, setTick] = useState(0);
+  const [unread, setUnread] = useState(0);
 
   const socketRef = useRef<WebSocket | null>(null);
   const attempts = useRef(0);
@@ -72,8 +83,23 @@ export function LiveProvider({ children }: { children: React.ReactNode }) {
   const handlers = useRef<Map<string, Set<(e: LiveEvent) => void>>>(new Map());
   const [, forceRender] = useState(0);
 
+  const refreshUnread = useCallback(async () => {
+    if (!token) return setUnread(0);
+    try {
+      const page = await api.get<{ unread: number }>('/notifications?limit=1', { token });
+      setUnread(page.unread ?? 0);
+    } catch {
+      // The badge is an affordance, not a fact the screen depends on. A failed
+      // count leaves the previous number rather than flickering to zero.
+    }
+  }, [token]);
+
   const emit = useCallback((envelope: LiveEvent) => {
     setLastEventAt(Date.now());
+    // A notification arriving is the event that should move the badge; the
+    // inbox itself clears it, and a reconnect reconciles the count against the
+    // API because a socket that was down cannot know what it missed.
+    if (envelope.event === 'notification.created') setUnread((n) => n + 1);
     handlers.current.get(envelope.event)?.forEach((fn) => {
       try {
         fn(envelope);
@@ -188,6 +214,12 @@ export function LiveProvider({ children }: { children: React.ReactNode }) {
     return () => sub.remove();
   }, [connect]);
 
+  // Reconcile the unread badge whenever the socket comes up or the session
+  // changes: the socket carries increments, this carries the truth.
+  useEffect(() => {
+    if (connected) void refreshUnread();
+  }, [connected, refreshUnread]);
+
   // Drives the "age of data" clock even when nothing is arriving.
   useEffect(() => {
     const id = setInterval(() => forceRender((v) => v + 1), 1000);
@@ -215,8 +247,10 @@ export function LiveProvider({ children }: { children: React.ReactNode }) {
       touched,
       reconnect,
       subscribe,
+      unread,
+      refreshUnread,
     }),
-    [connected, degraded, lastEventAt, facilities, touched, reconnect, subscribe],
+    [connected, degraded, lastEventAt, facilities, touched, reconnect, subscribe, unread, refreshUnread],
   );
 
   return <LiveContext.Provider value={value}>{children}</LiveContext.Provider>;

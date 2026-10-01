@@ -292,6 +292,20 @@ export default function Inbox() {
                     ? () => router.push(`/console/${n.incident_id}` as never)
                     : undefined
                 }
+                /* #35: an inbound alert in a ward inbox used to be a paragraph
+                   with no way to act on it; the accept/decline controls live on
+                   the dashboard, so the row now carries the reader there and
+                   focuses the queue. */
+                onReviewInbound={
+                  n.incident_id && user.role === 'hospital_admin' && n.kind === 'inbound_patient'
+                    ? () => router.push('/dashboard?focus=inbound' as never)
+                    : undefined
+                }
+                /* #36: a crew alert names an assignment the driver has to open;
+                   the crew screen is where it is worked. */
+                onOpenAssignment={
+                  n.incident_id && user.role === 'driver' ? () => router.push('/crew' as never) : undefined
+                }
                 onOpenFacility={
                   n.hospital_id && user.role === 'platform_admin'
                     ? () => router.push(`/facility/${n.hospital_id}` as never)
@@ -337,12 +351,16 @@ function AlertRow({
   onRead,
   onOpenIncident,
   onOpenFacility,
+  onReviewInbound,
+  onOpenAssignment,
 }: {
   row: NotificationItem;
   busy: boolean;
   onRead: () => void;
   onOpenIncident?: () => void;
   onOpenFacility?: () => void;
+  onReviewInbound?: () => void;
+  onOpenAssignment?: () => void;
 }) {
   const { t } = useTheme();
   const tone: Tone = SEVERITY_TONE[row.severity] ?? 'info';
@@ -432,6 +450,24 @@ function AlertRow({
           )}
           {onOpenIncident ? (
             <Button label="Open case" size="sm" variant="ghost" onPress={onOpenIncident} />
+          ) : null}
+          {onReviewInbound ? (
+            <Button
+              label="Review inbound case"
+              size="sm"
+              variant="secondary"
+              icon="ambulance"
+              onPress={onReviewInbound}
+            />
+          ) : null}
+          {onOpenAssignment ? (
+            <Button
+              label="Open assignment"
+              size="sm"
+              variant="secondary"
+              icon="ambulance"
+              onPress={onOpenAssignment}
+            />
           ) : null}
           {onOpenFacility ? (
             <Button label="Facility" size="sm" variant="ghost" onPress={onOpenFacility} />

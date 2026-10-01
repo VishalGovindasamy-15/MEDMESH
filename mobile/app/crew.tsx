@@ -88,12 +88,36 @@ const POSITION_INTERVAL_MS = 20_000;
  * list is the offline fallback for when that payload is coming from the cache.
  */
 const STAGES: { key: string; label: string; hint: string }[] = [
+  // The first stage is the one the audit found missing. The header said
+  // "Dispatched — accept the job" and the next button on offer was "Arrived at
+  // scene", so a driver's only way forward was to skip acceptance entirely and
+  // declare themselves on scene -- from the roadside, before turning a wheel.
+  // The backend permitted DISPATCHED -> AT_SCENE, so nothing complained, and the
+  // control room's arrival clock started against a journey that had not begun.
+  { key: 'en_route', label: 'Accept & go', hint: 'You have accepted the job and are moving towards the scene.' },
   { key: 'at_scene', label: 'Arrived at scene', hint: 'You are on scene. The patient is not in the vehicle yet.' },
   { key: 'patient_onboard', label: 'Patient loaded', hint: 'Patient is on the stretcher and being treated.' },
   { key: 'transporting', label: 'Departed scene', hint: 'The vehicle is moving with the patient aboard.' },
   { key: 'at_hospital', label: 'Arrived at hospital', hint: 'You are at the receiving facility.' },
   { key: 'handed_over', label: 'Handover complete', hint: 'The ward has taken responsibility. This releases the bed.' },
 ];
+
+/**
+ * Which resource to reserve when a crew re-routes.
+ *
+ * Derived from what the patient needs, not from what the receiving hospital
+ * happens to have free. The previous expression -- "if the destination has any
+ * capacity, hold ICU" -- meant a hospital with an ICU count in its feed got an
+ * ICU bed reserved for a sprained ankle, and the reservation is what removes
+ * that bed from everyone else's shortlist until it expires. The driver is the
+ * least informed person on the call about resource tier; the incident record is
+ * the authority, and this reads it.
+ */
+function holdResourceFor(incident: { requires: { icu: boolean; ventilator: boolean } }): string {
+  if (incident.requires.ventilator) return 'ventilator';
+  if (incident.requires.icu) return 'icu';
+  return 'bed';
+}
 
 /** Where the trip is, in the driver's words, for the header. */
 const CREW_STAGE_LABELS: Record<string, string> = {
@@ -289,7 +313,7 @@ export default function CrewScreen() {
     try {
       await api.post(
         `/incidents/${data.assignment.id}/reroute`,
-        { hospital_id: candidate.hospital_id, hold_resource: data.destination_capacity ? 'icu' : 'bed' },
+        { hospital_id: candidate.hospital_id, hold_resource: holdResourceFor(data.assignment) },
         { token },
       );
       await load(true);
@@ -327,6 +351,7 @@ export default function CrewScreen() {
   // `at_scene`, so it is folded in rather than treated as an unknown stage.
   const effectiveStatus = assignment?.status === 'arrived' ? 'at_scene' : assignment?.status;
   const stageIndex = assignment ? STAGES.findIndex((s) => s.key === effectiveStatus) : -1;
+  const nextStage = stageIndex >= 0 ? STAGES[stageIndex + 1] ?? null : null;
   const destLive = destination ? facilities[destination.id]?.capacity : null;
   const cap = destLive ?? data.destination_capacity;
 
@@ -497,6 +522,38 @@ export default function CrewScreen() {
 
         {error ? <Banner tone="critical" icon="alert" title="Action failed" body={error} /> : null}
 
+        {/* What the trip is doing, at the size of a headline.
+            The stage buttons below are the only control, and before this band
+            the current stage was a small pill in a header among four others. A
+            driver picking the phone up at a junction needs one thing from this
+            screen -- where am I in this job -- and it should not require
+            reading. */}
+        <Card
+          tone={
+            effectiveStatus === 'dispatched'
+              ? 'critical'
+              : effectiveStatus === 'handed_over' || effectiveStatus === 'closed' || effectiveStatus === 'cancelled'
+                ? 'live'
+                : 'info'
+          }
+          style={{ gap: space.xs }}
+        >
+          <Row justify="space-between" align="center" gap="sm" style={{ flexWrap: 'wrap' }}>
+            <Stack gap={2} style={{ minWidth: 200 }}>
+              <Label style={{ fontSize: 10 }}>This job</Label>
+              <Title style={{ fontSize: isDesktop ? 26 : 22 }}>
+                {CREW_STAGE_LABELS[effectiveStatus ?? ''] ?? 'Loading'}
+              </Title>
+            </Stack>
+            <Stack gap={2} align="flex-end">
+              <Label style={{ fontSize: 10 }}>Next step</Label>
+              <Num size={isDesktop ? 17 : 15} weight="700" color={t.fg.strong}>
+                {nextStage?.label ?? 'Nothing further'}
+              </Num>
+            </Stack>
+          </Row>
+        </Card>
+
         {/* A call taken without a handset location is plotted at the district
             centre. The crew still has to be told, because the map on this
             screen then points at a town hall twelve kilometres from the patient
@@ -574,13 +631,6 @@ export default function CrewScreen() {
                   ),
                 )
               }
-            />
-            <Button
-              label={`Call ${destination.short_name}`}
-              icon="phone"
-              variant="secondary"
-              size="lg"
-              onPress={() => Linking.openURL(`tel:${destination.phone.replace(/[^\d+]/g, '')}`)}
             />
             {/*
               This button said "Handoff to hospital desk" and dialled 108 — the

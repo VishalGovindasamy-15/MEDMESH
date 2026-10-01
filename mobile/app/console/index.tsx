@@ -4,8 +4,11 @@ import { Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from 'r
 
 import { api, ApiError } from '../../src/api/client';
 import { LocationPicker, type IncidentLocation } from '../../src/components/LocationPicker';
+import { DistrictField, type PickerDistrict } from '../../src/components/Selectors';
 import type { Ambulance, District, Incident } from '../../src/api/types';
-import { categoryLabel, clockTime, elapsed, STATUS_LABELS } from '../../src/lib/format';
+import { categoryLabel, clockTime, elapsed, relativeFromIso, STATUS_LABELS } from '../../src/lib/format';
+import { MapSurface } from '../../src/components/MapSurface';
+import type { MapPoint } from '../../src/components/mapTypes';
 import { useAuth } from '../../src/state/AuthProvider';
 import { useLive } from '../../src/state/LiveProvider';
 import { useTheme } from '../../src/theme/ThemeProvider';
@@ -139,6 +142,19 @@ export default function ConsoleScreen() {
   const [derived, setDerived] = useState<{ rationale: string[]; scene_advisories: string[] } | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [intakeError, setIntakeError] = useState<string | null>(null);
+  /**
+   * Triage detail is collapsed by default.
+   *
+   * The audit's finding was not that any one field was wrong but that the form
+   * made an operator answer seventeen questions before the record existed, and
+   * that the button which finally did it was called "Run matching" — an
+   * algorithm's name for the act of raising an emergency. Emergency type,
+   * priority and location are what a call-taker has within the first fifteen
+   * seconds; everything else is filled in as the call continues, or afterwards
+   * from the crew's report. Nothing here is required, and the server derives the
+   * resource requirement from whatever is supplied.
+   */
+  const [triageOpen, setTriageOpen] = useState(false);
 
   const load = async (silent = false) => {
     if (!silent) setRefreshing(true);
@@ -212,13 +228,17 @@ export default function ConsoleScreen() {
    * because a control room does take calls outside its own area, and hiding them
    * would force the wrong district to be picked instead.
    */
-  const districtOptions = useMemo(() => {
-    const own = districts.filter((d) => d.id === user?.district_id);
-    const rest = districts
-      .filter((d) => d.id !== user?.district_id)
-      .sort((a, b) => (b.hospital_count ?? 0) - (a.hospital_count ?? 0) || a.name.localeCompare(b.name));
-    return [...own, ...rest];
-  }, [districts, user?.district_id]);
+  const districtOptions = useMemo<PickerDistrict[]>(
+    () =>
+      districts.map((d) => ({
+        id: d.id,
+        name: d.name,
+        name_ta: d.name_ta,
+        headquarters: null,
+        facilities: d.hospital_count ?? 0,
+      })),
+    [districts],
+  );
 
   const visible = useMemo(() => {
     const list = incidents ?? [];
@@ -291,6 +311,42 @@ export default function ConsoleScreen() {
   };
 
   const availableFleet = fleet.filter((a) => a.status === 'available');
+
+  /**
+   * The fleet as a board, by trip stage (#34).
+   *
+   * The queue used to show eight units with a status word each and nothing
+   * else: no sense of how many are actually movable, and no picture of where
+   * the district's vehicles are. The counts answer "can I commit another unit
+   * right now" at a glance; the map answers "which side of the district is it
+   * on", which is the question behind every manual crew choice.
+   */
+  const stageCounts = useMemo(() => {
+    const order = ['available', 'assigned', 'en_route', 'at_scene', 'transporting', 'at_hospital', 'out_of_service'] as const;
+    return order.map((st) => ({ stage: st, n: fleet.filter((u) => u.status === st).length })).filter((r) => r.n > 0);
+  }, [fleet]);
+
+  const fleetPoints = useMemo<MapPoint[]>(
+    () =>
+      fleet
+        .filter((u) => typeof u.lat === 'number' && typeof u.lng === 'number' && u.status !== 'out_of_service')
+        .map((u) => {
+          const ageSec = u.updated_at ? Math.max(0, (Date.now() - new Date(u.updated_at).getTime()) / 1000) : null;
+          return {
+            id: u.id,
+            short_name: u.call_sign.replace(/^108-/, ''),
+            name: u.call_sign,
+            lat: u.lat as number,
+            lng: u.lng as number,
+            pin_override: FLEET_STAGE_TONE[u.status] ?? FLEET_STAGE_TONE.available,
+            // A vehicle whose GPS is old is drawn as old: the ring says how much
+            // to trust the dot, exactly as it does for facility capacity.
+            freshness_override:
+              ageSec === null ? 'unknown' : ageSec > 600 ? 'stale' : ageSec > 120 ? 'warming' : 'fresh',
+          };
+        }),
+    [fleet],
+  );
   const openCount = (incidents ?? []).filter((i) => i.status === 'open').length;
   const activeCount = (incidents ?? []).filter(
     (i) => !['handed_over', 'closed', 'cancelled'].includes(i.status),
@@ -359,20 +415,20 @@ export default function ConsoleScreen() {
         />
       </Stack>
 
-      {/* District first, then landmark, then the coordinate capture: the
-          coordinate is scoped to the district (see LocationPicker), so asking
-          for it before the district is known would invite a pin in the wrong
-          one. */}
-      <Stack gap="sm">
-        <Label>District</Label>
-        <Segmented
-          options={districtOptions.map((d) => ({ value: String(d.id), label: d.name }))}
-          value={districtId}
-          onChange={setDistrictId}
-          size="sm"
-          scroll
-        />
-      </Stack>
+      {/* Step 3 of four: where.
+          District first, then landmark, then the coordinate capture, because the
+          coordinate is scoped to the district (see LocationPicker) and asking
+          for a pin before the district is known invites one in the wrong one.
+          The chooser is a searchable list rather than a chip row: thirty-eight
+          districts is a scroll no operator should have to perform, and the row
+          gave no way to search. */}
+      <DistrictField
+        districts={districtOptions}
+        value={districtId ? Number(districtId) : null}
+        onChange={(id) => setDistrictId(String(id))}
+        label="Incident district"
+        hint="defaults to your own"
+      />
 
       <TextField
         label="Landmark"
@@ -401,11 +457,65 @@ export default function ConsoleScreen() {
         onChange={setLocation}
       />
 
-      {/* Scene assessment -------------------------------------------------
+      <Row gap="sm">
+        <Button
+          label="Create incident & find hospital"
+          variant="primary"
+          icon="siren"
+          loading={submitting}
+          onPress={createIncident}
+          style={{ flex: 1 }}
+        />
+        {!isDesktop ? <Button label="Cancel" onPress={() => setComposerOpen(false)} /> : null}
+      </Row>
+
+      <Small muted style={{ fontSize: 11 }}>
+        Raises the emergency record and ranks every facility in the region by capability, ETA, true free
+        capacity, trust and current load — then opens the shortlist. Triage detail below can be added first,
+        or left until the call is over.
+      </Small>
+    
+      {/* Optional triage details -------------------------------------------
           Structured, not narrated. The report's intake requirement is a
-          non-identifying condition category, and a call-taker under pressure
-          is faster ticking six closed options than composing a sentence --
-          which is also why no narrative field is offered. */}
+          non-identifying condition category, and a call-taker under pressure is
+          faster ticking six closed options than composing a sentence -- which
+          is also why no narrative field is offered.
+
+          Collapsed by default. The create button sits above this block, so a
+          call-taker on a two-minute call creates the record from three answers
+          and adds detail afterwards; a crew's own report fills in what was
+          never known at the time. */}
+      <Pressable
+        onPress={() => setTriageOpen((v) => !v)}
+        accessibilityRole="button"
+        accessibilityState={{ expanded: triageOpen }}
+        style={({ pressed }) => ({
+          flexDirection: 'row',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: space.sm,
+          paddingHorizontal: space.md,
+          paddingVertical: 10,
+          borderRadius: radius.md,
+          borderWidth: StyleSheet.hairlineWidth,
+          borderColor: t.line.base,
+          backgroundColor: t.bg.sunken,
+          opacity: pressed ? 0.85 : 1,
+        })}
+      >
+        <Row gap="sm" align="center">
+          <Icon name={triageOpen ? 'chevronUp' : 'chevronDown'} size={15} color={t.fg.muted} />
+          <Body style={{ fontSize: 13, fontWeight: '600' }}>Optional triage details</Body>
+        </Row>
+        <Small muted style={{ fontSize: 11 }}>
+          {observations.length || scene.patient_state !== 'unknown' || scene.mechanism !== 'none'
+            ? `${observations.length} flag${observations.length === 1 ? '' : 's'} recorded`
+            : 'not required to create the record'}
+        </Small>
+      </Pressable>
+
+      {triageOpen ? (
+        <>
       <Stack gap="sm">
         <Label>Patient condition</Label>
         <Segmented
@@ -544,24 +654,10 @@ export default function ConsoleScreen() {
           overrides the inference.
         </Small>
       </Card>
+        </>
+      ) : null}
 
-      <Row gap="sm">
-        <Button
-          label="Run matching"
-          variant="primary"
-          icon="search"
-          loading={submitting}
-          onPress={createIncident}
-          style={{ flex: 1 }}
-        />
-        {!isDesktop ? <Button label="Cancel" onPress={() => setComposerOpen(false)} /> : null}
-      </Row>
-
-      <Small muted style={{ fontSize: 11 }}>
-        Pressing this ranks every facility in the region by capability, ETA, true free capacity, trust and current load —
-        and opens the shortlist.
-      </Small>
-    </Card>
+</Card>
   );
 
   return (
@@ -648,6 +744,50 @@ export default function ConsoleScreen() {
                     />
                   }
                 />
+                <Row gap={6} wrap>
+                  {stageCounts.map((r) => (
+                    <Pill
+                      key={r.stage}
+                      label={`${r.n} ${r.stage.replace(/_/g, ' ')}`}
+                      tone={r.stage === 'available' ? 'live' : r.stage === 'out_of_service' ? 'stale' : 'info'}
+                      compact
+                    />
+                  ))}
+                </Row>
+
+                {fleetPoints.length ? (
+                  <Stack gap={6}>
+                    <MapSurface points={fleetPoints} height={210} showLegend={false} showLabels={false} />
+                    <Row gap={space.md} wrap align="center">
+                      {([
+                        ['available', 'Available'],
+                        ['assigned', 'Assigned'],
+                        ['en_route', 'En route'],
+                        ['at_scene', 'At scene'],
+                        ['transporting', 'Transporting'],
+                        ['at_hospital', 'At hospital'],
+                      ] as const).map(([st, label]) => (
+                        <Row key={st} gap={4} align="center">
+                          <View
+                            style={{
+                              width: 7,
+                              height: 7,
+                              borderRadius: 4,
+                              backgroundColor: FLEET_STAGE_TONE[st].fill,
+                            }}
+                          />
+                          <Small muted style={{ fontSize: 10.5 }}>
+                            {label}
+                          </Small>
+                        </Row>
+                      ))}
+                      <Small muted style={{ fontSize: 10.5, marginLeft: 'auto' }}>
+                        Ring = GPS age
+                      </Small>
+                    </Row>
+                  </Stack>
+                ) : null}
+
                 <Stack gap={0}>
                   {fleet.slice(0, 8).map((unit, i) => (
                     <Row
@@ -665,6 +805,7 @@ export default function ConsoleScreen() {
                         <Num size={12.5}>{unit.call_sign}</Num>
                         <Small muted style={{ fontSize: 11 }} numberOfLines={1}>
                           {unit.capability_label} · {unit.operator_name}
+                          {unit.updated_at ? ` · GPS ${relativeFromIso(unit.updated_at)}` : ''}
                         </Small>
                       </Stack>
                       <Pill
@@ -694,6 +835,25 @@ export default function ConsoleScreen() {
     </AppShell>
   );
 }
+
+/**
+ * Fleet stage colours (#34).
+ *
+ * Deliberately not the facility palette: this map answers "where are my
+ * vehicles and what are they doing", and reusing the capacity colours would
+ * make a green ambulance read as "ICU free". Green means movable, amber means
+ * committed to a call, the deeper amber means hands on the patient, grey means
+ * the vehicle is out of the picture.
+ */
+const FLEET_STAGE_TONE: Record<string, { fill: string; ring: string; label: string }> = {
+  available: { fill: '#137547', ring: '#0e5c37', label: 'Available' },
+  assigned: { fill: '#3f6ea5', ring: '#2f5480', label: 'Assigned' },
+  en_route: { fill: '#8a5a00', ring: '#6d4700', label: 'En route' },
+  at_scene: { fill: '#a3560f', ring: '#7d420b', label: 'At scene' },
+  transporting: { fill: '#a32217', ring: '#7d1a12', label: 'Transporting' },
+  at_hospital: { fill: '#5b6472', ring: '#454c57', label: 'At hospital' },
+  out_of_service: { fill: '#8b93a1', ring: '#6d7480', label: 'Out of service' },
+};
 
 /* -------------------------------------------------------------- incident card */
 

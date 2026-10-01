@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Pressable, StyleSheet, View } from 'react-native';
+import { Platform, Pressable, StyleSheet, View } from 'react-native';
 
+import { straightKm } from '../lib/geo';
 import { useTheme } from '../theme/ThemeProvider';
 import { radius, space } from '../theme/tokens';
 import { Banner, Button, Label, Num, Row, Small, Stack, TextField } from '../ui';
@@ -82,7 +83,20 @@ export function LocationPicker({
   onChange: (next: IncidentLocation | null) => void;
 }) {
   const { t } = useTheme();
-  const [open, setOpen] = useState(false);
+  /**
+   * Which capture control is showing, if any.
+   *
+   * This used to be a single boolean behind a "Set location" button, and the
+   * audit's complaint was fair: the first action of an emergency console was a
+   * button that opened a panel that contained four more buttons, and an operator
+   * who did not already know that "district centre" was an option read the
+   * screen as blocked. The three ways of getting a coordinate are now visible
+   * from the start, and the approximate fallback is a labelled row underneath
+   * them rather than a hole an operator has to find.
+   */
+  const [mode, setMode] = useState<'none' | 'coordinates' | 'map'>('none');
+  const setOpen = (v: boolean) => setMode(v ? 'coordinates' : 'none');
+  const open = mode !== 'none';
   const [latText, setLatText] = useState('');
   const [lngText, setLngText] = useState('');
   const [problem, setProblem] = useState<string | null>(null);
@@ -108,26 +122,12 @@ export function LocationPicker({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [districtId]);
 
-  /** Rough great-circle distance, purely to sanity-check the pin. */
-  const straightKm = useCallback(
-    (a: { lat: number; lng: number }, b: { lat: number; lng: number }) => {
-      const R = 6371;
-      const dLat = ((b.lat - a.lat) * Math.PI) / 180;
-      const dLng = ((b.lng - a.lng) * Math.PI) / 180;
-      const la1 = (a.lat * Math.PI) / 180;
-      const la2 = (b.lat * Math.PI) / 180;
-      const h = Math.sin(dLat / 2) ** 2 + Math.cos(la1) * Math.cos(la2) * Math.sin(dLng / 2) ** 2;
-      return 2 * R * Math.asin(Math.sqrt(h));
-    },
-    [],
-  );
-
   const commit = useCallback(
     (lat: number, lng: number, method: CaptureMethod) => {
       const offset = district ? straightKm(district, { lat, lng }) : null;
       onChange({ lat, lng, method, source: CAPTURE_TO_SOURCE[method], offsetKm: offset });
     },
-    [district, straightKm, onChange],
+    [district, onChange],
   );
 
   const applyTyped = () => {
@@ -241,7 +241,49 @@ export function LocationPicker({
             </Small>
           )}
         </Stack>
-        <Button label={open ? 'Close' : 'Set location'} size="sm" onPress={() => setOpen((v) => !v)} />
+      </Row>
+
+      {/* The three capture controls, always visible. A call-taker reading a
+          coordinate off a phone mast or a caller's SMS has everything they need
+          here without opening anything. */}
+      <Row gap="xs" wrap>
+        <Button
+          label="Paste coordinates"
+          icon="keyboard"
+          size="sm"
+          variant={mode === 'coordinates' ? 'primary' : 'secondary'}
+          onPress={() => setMode(mode === 'coordinates' ? 'none' : 'coordinates')}
+        />
+        <Button
+          label="Drop pin"
+          icon="pin"
+          size="sm"
+          variant={mode === 'map' ? 'primary' : 'secondary'}
+          onPress={() => setMode(mode === 'map' ? 'none' : 'map')}
+        />
+        <Button
+          label={locating ? 'Locating…' : 'Use device location'}
+          icon="crosshair"
+          size="sm"
+          loading={locating}
+          onPress={useDevice}
+        />
+      </Row>
+
+      {/* The fallback, stated as a fallback. It is a legitimate answer to "the
+          caller cannot say where they are" and it is recorded as approximate,
+          so it belongs on the screen rather than hidden behind a link. */}
+      <Row gap="sm" align="center" style={{ flexWrap: 'wrap' }}>
+        <Small muted style={{ fontSize: 11.5 }}>
+          Can&apos;t get an exact location?
+        </Small>
+        <Button
+          label="Use district centre — approximate"
+          size="sm"
+          variant="ghost"
+          onPress={useDistrictCentre}
+          disabled={!district}
+        />
       </Row>
 
       {isPlaceholder && !farFromDistrict ? (
@@ -262,7 +304,9 @@ export function LocationPicker({
         />
       ) : null}
 
-      {open ? (
+      {problem ? <Banner tone="critical" icon="alert" title="Not accepted" body={problem} /> : null}
+
+      {mode !== 'none' ? (
         <View
           style={{
             padding: space.md,
@@ -273,64 +317,61 @@ export function LocationPicker({
             gap: space.md,
           }}
         >
-          {problem ? <Banner tone="critical" icon="alert" title="Not accepted" body={problem} /> : null}
-
-          <Stack gap="xs">
-            <Label>Coordinates from the call</Label>
-            <Row gap="sm" wrap>
-              <TextField
-                label="Latitude"
-                value={latText}
-                onChangeText={setLatText}
-                placeholder="11.01684"
-                keyboardType="numeric"
-                style={{ flex: 1, minWidth: 130 }}
-              />
-              <TextField
-                label="Longitude"
-                value={lngText}
-                onChangeText={setLngText}
-                placeholder="76.95583"
-                keyboardType="numeric"
-                style={{ flex: 1, minWidth: 130 }}
-              />
-              <View style={{ justifyContent: 'flex-end', paddingBottom: 2 }}>
-                <Button label="Use these" size="md" variant="primary" onPress={applyTyped} />
-              </View>
-            </Row>
-          </Stack>
-
-          <Row gap="xs" style={{ flexWrap: 'wrap' }}>
-            <Button
-              label={locating ? 'Locating…' : 'Use this device\'s location'}
-              icon="pin"
-              size="sm"
-              loading={locating}
-              onPress={useDevice}
-            />
-            <Button
-              label="District centre (approximate)"
-              size="sm"
-              variant="ghost"
-              onPress={useDistrictCentre}
-              disabled={!district}
-            />
-            <Button
-              label="Clear"
-              size="sm"
-              variant="ghost"
-              onPress={() => {
-                setLatText('');
-                setLngText('');
-                onChange(null);
-              }}
-            />
+          <Row justify="space-between" align="center">
+            <Label>{mode === 'map' ? 'Drop a pin where the caller is' : 'Coordinates from the call'}</Label>
+            <Button label="Close" size="sm" variant="ghost" onPress={() => setMode('none')} />
           </Row>
 
+          {mode === 'coordinates' ? (
+            <Stack gap="xs">
+              <Label>Latitude and longitude</Label>
+              <Row gap="sm" wrap>
+                <TextField
+                  label="Latitude"
+                  value={latText}
+                  onChangeText={setLatText}
+                  placeholder="11.01684"
+                  keyboardType="numeric"
+                  style={{ flex: 1, minWidth: 130 }}
+                />
+                <TextField
+                  label="Longitude"
+                  value={lngText}
+                  onChangeText={setLngText}
+                  placeholder="76.95583"
+                  keyboardType="numeric"
+                  style={{ flex: 1, minWidth: 130 }}
+                />
+                <View style={{ justifyContent: 'flex-end', paddingBottom: 2 }}>
+                  <Button label="Use these" size="md" variant="primary" onPress={applyTyped} />
+                </View>
+              </Row>
+              <Row gap="xs" wrap>
+                <Button
+                  label="Clear"
+                  size="sm"
+                  variant="ghost"
+                  onPress={() => {
+                    setLatText('');
+                    setLngText('');
+                    onChange(null);
+                  }}
+                />
+              </Row>
+            </Stack>
+          ) : null}
+
+          {mode === 'map' ? (
           <Stack gap="xs">
-            <Label>Or drop a pin</Label>
             <Small muted style={{ fontSize: 11.5 }}>
-              Tap the map where the caller is. Zoom in before tapping — at this scale a few pixels is a kilometre.
+              {/* #8: the instruction has to match the gesture. On the web build
+                  a click places the pin; on a phone the map view reserves taps
+                  for panning and marker selection, so placement is a long
+                  press. Telling a phone operator to "tap" produced taps that
+                  did nothing, which reads as a broken map. */}
+              {Platform.OS === 'web'
+                ? 'Tap the map where the caller is. Zoom in before tapping — at this scale a few pixels is a kilometre.'
+                : 'Press and hold the map where the caller is. Zoom in first — at this scale a few pixels is a kilometre.'}
             </Small>
             <MapSurface
               center={mapCenter ?? (district ? { lat: district.lat, lng: district.lng } : { lat: 11.0168, lng: 76.9558 })}
@@ -360,6 +401,7 @@ export function LocationPicker({
               }}
             />
           </Stack>
+          ) : null}
         </View>
       ) : null}
     </Stack>

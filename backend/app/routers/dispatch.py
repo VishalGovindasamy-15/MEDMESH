@@ -36,6 +36,7 @@ from ..models import (
     Hospital,
     Incident,
     IncidentStatus,
+    Notification,
     NotificationKind,
     SurgeEvent,
     User,
@@ -264,6 +265,17 @@ def incident_out(incident: Incident, *, db: Session, detail: bool = False) -> di
             "ventilator": incident.requires_ventilator,
             "blood": incident.requires_blood,
             "specialty": incident.required_specialty,
+            # The crew capability this incident asks for, in preference order.
+            # Sent to the client so the manual picker can rank units the same way
+            # the engine does -- the alternative is the browser re-implementing
+            # the capability table, and then the picker and the engine disagree
+            # about which unit is right, which is exactly the inconsistency the
+            # manual override exists to avoid.
+            "ambulance": required_ambulance_capabilities(incident),
+            "ambulance_labels": [
+                AMBULANCE_CAPABILITY_LABELS.get(c, c)
+                for c in required_ambulance_capabilities(incident)
+            ],
         },
         "status": incident.status.value,
                 # `.get` with a fallback rather than a direct lookup: this table is
@@ -1022,6 +1034,23 @@ async def reroute(
     if previous and previous.id == hospital.id:
         raise HTTPException(status_code=409, detail="Incident is already assigned to this facility")
 
+    # A re-route moves the destination, not the crew. The vehicle carrying the
+    # patient cannot be swapped from under them mid-trip, and silently dropping
+    # a crew id sent here would let a console believe it had re-crewed a trip
+    # when nothing changed — so the request is refused with the reason rather
+    # than accepted with a shrug.
+    if payload.ambulance_id is not None:
+        current_id = incident.assigned_ambulance_id
+        if payload.ambulance_id != current_id:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Crew assignment is not part of a re-route — the unit carrying this "
+                    "patient stays with them until the trip closes. Dispatch a new "
+                    "incident to commit a different unit."
+                ),
+            )
+
     # A facility that has already refused this patient is refused again, unless
     # the dispatcher says why. Re-offering a closed door is how a ward ends up
     # receiving two alerts for the same ambulance and stops trusting the queue --
@@ -1385,13 +1414,7 @@ def crew_assignment(user: CurrentUser, db: Session = Depends(get_db)):
         select(Incident)
         .where(
             Incident.assigned_ambulance_id == ambulance.id,
-            Incident.status.in_(
-                (
-                    IncidentStatus.DISPATCHED,
-                    IncidentStatus.EN_ROUTE,
-                    IncidentStatus.ARRIVED,
-                )
-            ),
+            Incident.status.in_(tuple(lifecycle.ACTIVE_TRIP_STATES)),
         )
         .order_by(Incident.dispatched_at.desc())
         .limit(1)
@@ -2028,6 +2051,31 @@ def _facility_for(db: Session, user: User) -> Hospital:
     return hospital
 
 
+def _ack_inbound_alerts(db: Session, *, hospital_id: int, incident_id: int, user: User) -> int:
+    """Mark a ward's inbound alerts for this case as answered (#45 in the plan).
+
+    Acting on an alert *is* reading it. Leaving it sitting unread in the inbox
+    after the ward has accepted the patient means the next person to open the
+    queue sees a critical badge for something already handled, and the unread
+    count stops meaning anything. `acknowledged_by` records who closed the loop.
+    """
+    rows = list(
+        db.execute(
+            select(Notification).where(
+                Notification.hospital_id == hospital_id,
+                Notification.incident_id == incident_id,
+                Notification.kind == NotificationKind.INBOUND_PATIENT,
+                Notification.read_at.is_(None),
+            )
+        ).scalars().all()
+    )
+    now = utcnow()
+    for n in rows:
+        n.read_at = now
+        n.acknowledged_by = user.id
+    return len(rows)
+
+
 @router.post("/incidents/{incident_id}/facility-response")
 async def facility_response(
     incident_id: int,
@@ -2107,6 +2155,7 @@ async def facility_response(
             ),
             actor=user,
         )
+        _ack_inbound_alerts(db, hospital_id=hospital.id, incident_id=incident.id, user=user)
         db.commit()
         await live_store.publish(
             "hospital.accepted",
@@ -2224,6 +2273,7 @@ async def facility_response(
         severity="critical",
         incident_id=incident.id,
     )
+    _ack_inbound_alerts(db, hospital_id=hospital.id, incident_id=incident.id, user=user)
     db.commit()
 
     # Fresh options, computed now that the declined facility's capacity has been

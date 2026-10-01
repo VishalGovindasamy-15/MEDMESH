@@ -31,7 +31,7 @@ const EN: Dict = {
   'app.tagline': 'CAPACITY EXCHANGE',
   'home.title': 'Where is care available right now',
   'home.search': 'Hospital, area or landmark',
-  'home.searchHint': 'Search by name or area',
+  'home.searchHint': 'Name, district, specialty or capability — e.g. snakebite Pollachi',
   'home.voice': 'Speak your search',
   'home.voiceListening': 'Listening…',
   'home.voiceUnsupported': 'Voice search needs a browser with speech recognition',

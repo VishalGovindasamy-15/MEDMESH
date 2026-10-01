@@ -18,6 +18,7 @@ import type {
   OnboardingApplication,
   Role,
 } from '../../src/api/types';
+import { FacilityPicker } from '../../src/components/Selectors';
 import { relativeFromIso } from '../../src/lib/format';
 import { useAuth } from '../../src/state/AuthProvider';
 import type { Tokens } from '../../src/theme/tokens';
@@ -28,6 +29,7 @@ import {
   Body,
   Button,
   Card,
+  ConfirmDialog,
   Divider,
   EmptyState,
   Heading,
@@ -108,6 +110,8 @@ export default function AdminConsole() {
   const [error, setError] = useState<string | null>(null);
 
   const [audit, setAudit] = useState<AuditEntry[]>([]);
+  const [auditTotal, setAuditTotal] = useState(0);
+  const [auditHasMore, setAuditHasMore] = useState(false);
   const [complaints, setComplaints] = useState<Complaint[]>([]);
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [connectors, setConnectors] = useState<Connector[]>([]);
@@ -133,7 +137,10 @@ export default function AdminConsole() {
           api.get<{ templates: ConnectorTemplate[] }>('/connectors/templates', { token }),
           api.get<{ results: OnboardingApplication[] }>('/onboarding/queue', { token }),
           api.get<{ results: Facility[] }>('/hospitals?include_unverified=true&limit=200', { token }),
-          api.get<{ results: AuditEntry[] }>('/governance/audit?hours=72&limit=300', { token }),
+          api.get<{ results: AuditEntry[]; total?: number; has_more?: boolean }>(
+            '/governance/audit?hours=72&limit=200',
+            { token },
+          ),
           api.get<{ results: Complaint[] }>('/governance/feedback', { token }),
           api.get<{ results: District[] }>('/hospitals/districts', { token }),
           api.get<{ count: number }>('/ambulances?limit=1', { token }),
@@ -145,6 +152,8 @@ export default function AdminConsole() {
         setQueue(q.results);
         setFacilities(f.results);
         setAudit(a.results);
+        setAuditTotal(a.total ?? a.results.length);
+        setAuditHasMore(Boolean(a.has_more));
         setComplaints(fb.results);
         setDistricts(dist.results);
         setFleetSize(fleet.count);
@@ -157,6 +166,28 @@ export default function AdminConsole() {
     },
     [token, isAdmin],
   );
+
+  /**
+   * Fetch the next page of the audit trail.
+   *
+   * The panel pages locally first — 200 rows is more than anyone reads in one
+   * sitting — and calls this only when the reader has actually reached the end
+   * of what was fetched. Rows already held are dropped by id, so a page boundary
+   * that shifts under a live write cannot duplicate an entry.
+   */
+  const loadMoreAudit = useCallback(async () => {
+    if (!token) return;
+    const res = await api.get<{ results: AuditEntry[]; total?: number; has_more?: boolean }>(
+      `/governance/audit?hours=72&limit=200&offset=${audit.length}`,
+      { token },
+    );
+    setAudit((prev) => {
+      const seen = new Set(prev.map((e) => e.id));
+      return [...prev, ...res.results.filter((e) => !seen.has(e.id))];
+    });
+    setAuditTotal(res.total ?? auditTotal);
+    setAuditHasMore(Boolean(res.has_more));
+  }, [token, audit.length, auditTotal]);
 
   useEffect(() => {
     void load();
@@ -261,6 +292,7 @@ export default function AdminConsole() {
             estate={estate}
             templates={templates}
             facilities={facilities}
+            districts={districts}
             onChange={load}
             onFlash={setFlash}
           />
@@ -274,7 +306,9 @@ export default function AdminConsole() {
           <ComplaintsPanel complaints={complaints} onChange={load} onFlash={setFlash} />
         ) : null}
 
-        {tab === 'audit' ? <AuditPanel entries={audit} /> : null}
+        {tab === 'audit' ? (
+          <AuditPanel entries={audit} total={auditTotal} hasMore={auditHasMore} onLoadMore={loadMoreAudit} />
+        ) : null}
       </ScrollView>
     </AppShell>
   );
@@ -314,6 +348,102 @@ function UsersPanel({
   });
 
   const [crewless, setCrewless] = useState<Ambulance[]>([]);
+  const [facilityPickerOpen, setFacilityPickerOpen] = useState(false);
+  const [toggleTarget, setToggleTarget] = useState<AdminUser | null>(null);
+  const [facilityPickerForEdit, setFacilityPickerForEdit] = useState(false);
+  const [editing, setEditing] = useState<AdminUser | null>(null);
+  const [editForm, setEditForm] = useState({
+    full_name: '',
+    email: '',
+    role: 'hospital_admin' as Role,
+    hospital_id: '',
+    district_id: '',
+    ambulance_id: '',
+  });
+
+  // The vehicle picker in the edit form. Fetched only when a crew account is
+  // being edited — sixty-six call signs is nothing, but there is no reason to
+  // carry them for a ward account edit.
+  const [fleet, setFleet] = useState<Ambulance[]>([]);
+  useEffect(() => {
+    if (editForm.role !== 'driver' || !token) return;
+    let cancelled = false;
+    api
+      .get<{ results: Ambulance[] }>('/ambulances?limit=200', { token })
+      .then((res) => !cancelled && setFleet(res.results))
+      .catch(() => !cancelled && setFleet([]));
+    return () => {
+      cancelled = true;
+    };
+  }, [editForm.role, token]);
+
+  const startEdit = useCallback((u: AdminUser) => {
+    setEditing(u);
+    setEditForm({
+      full_name: u.full_name,
+      email: u.email,
+      role: u.role,
+      hospital_id: u.hospital_id ? String(u.hospital_id) : '',
+      district_id: u.district_id ? String(u.district_id) : '',
+      ambulance_id: u.ambulance_id ? String(u.ambulance_id) : '',
+    });
+  }, []);
+
+  /**
+   * Save an account edit (#37).
+   *
+   * Provisioning used to be one-way: a dispatcher who moved hospitals, or a
+   * ward account that should have been scoped to the new annex, had to be
+   * disabled and recreated — which throws away the audit history attached to
+   * the old id, and the audit history is the part anybody comes back for.
+   */
+  const saveEdit = useCallback(async () => {
+    if (!token || !editing) return;
+    setBusy(editing.id);
+    try {
+      await api.patch(
+        `/governance/users/${editing.id}`,
+        {
+          full_name: editForm.full_name.trim(),
+          email: editForm.email.trim().toLowerCase(),
+          role: editForm.role,
+          hospital_id: editForm.hospital_id ? Number(editForm.hospital_id) : null,
+          district_id: editForm.district_id ? Number(editForm.district_id) : null,
+          ambulance_id: editForm.ambulance_id ? Number(editForm.ambulance_id) : null,
+        },
+        { token },
+      );
+      onFlash({ tone: 'live', title: `${editForm.full_name} updated`, body: 'The change is in the audit log.' });
+      setEditing(null);
+      onChange();
+    } catch (err) {
+      onFlash({
+        tone: 'critical',
+        title: 'That edit was refused',
+        body: err instanceof ApiError ? err.message : undefined,
+      });
+    } finally {
+      setBusy(null);
+    }
+  }, [token, editing, editForm, onChange, onFlash]);
+
+  const selectedFacility = useMemo(
+    () => facilities.find((f) => String(f.id) === form.hospital_id) ?? null,
+    [facilities, form.hospital_id],
+  );
+
+  // The pickers want a facility count per district and the admin list calls it
+  // `hospital_count`. Mapped here rather than widening either type.
+  const pickerDistricts = useMemo(
+    () =>
+      districts.map((d: District) => ({
+        id: d.id,
+        name: d.name,
+        name_ta: d.name_ta ?? null,
+        facilities: d.hospital_count ?? 0,
+      })),
+    [districts],
+  );
 
   const filtered = useMemo(
     () => users.filter((u) => roleFilter === 'all' || u.role === roleFilter),
@@ -424,7 +554,16 @@ function UsersPanel({
     }
   }, [token, form, onChange, onFlash]);
 
-  const toggleActive = useCallback(
+  /**
+   * Disable or re-enable an account, behind a confirmation (#38).
+   *
+   * The row's button used to flip `is_active` on a single click, in a table of
+   * forty accounts where a mis-click is one wrong row. Disabling someone is the
+   * kind of action that pages a platform operator at midnight, so it now says
+   * who, what and what it means before it happens. Re-enabling is the same
+   * dialog — the asymmetry would imply one direction is safe to hit by accident.
+   */
+  const confirmToggle = useCallback(
     async (target: AdminUser) => {
       if (!token) return;
       setBusy(target.id);
@@ -525,22 +664,36 @@ function UsersPanel({
               {form.role === 'hospital_admin' ? (
                 <Stack gap={6}>
                   <Label>Facility they report for</Label>
-                  <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-                    <Row gap={space.sm}>
-                      {facilities.slice(0, 14).map((f) => {
-                        const active = String(f.id) === form.hospital_id;
-                        return (
-                          <Button
-                            key={f.id}
-                            label={f.short_name}
-                            size="sm"
-                            variant={active ? 'primary' : 'secondary'}
-                            onPress={() => setForm((prev) => ({ ...prev, hospital_id: String(f.id) }))}
-                          />
-                        );
-                      })}
-                    </Row>
-                  </ScrollView>
+                  {/* Was a chip row of the first fourteen facilities, with no
+                      indication that there were a hundred and thirty more and no
+                      way to reach them: an account for any facility outside the
+                      first page of the list simply could not be created. The
+                      shared picker searches all of them and says when it is
+                      showing a subset. */}
+                  {facilityPickerOpen ? (
+                    <FacilityPicker
+                      facilities={facilities}
+                      districts={pickerDistricts}
+                      value={form.hospital_id ? Number(form.hospital_id) : null}
+                      title="Facility this account reports for"
+                      onPick={(id) => {
+                        setForm((prev) => ({ ...prev, hospital_id: String(id) }));
+                        setFacilityPickerOpen(false);
+                      }}
+                      onClose={() => setFacilityPickerOpen(false)}
+                    />
+                  ) : (
+                    <Button
+                      label={
+                        selectedFacility
+                          ? `${selectedFacility.short_name} · ${selectedFacility.district_name ?? ''}`.trim()
+                          : `Choose from ${facilities.length} facilities`
+                      }
+                      icon="hospital"
+                      variant={selectedFacility ? 'secondary' : 'primary'}
+                      onPress={() => setFacilityPickerOpen(true)}
+                    />
+                  )}
                   <Small muted>
                     A hospital account is scoped to one facility, and the API refuses it without one — an
                     unscoped bed-control login is how a facility ends up editing somebody else's numbers.
@@ -692,18 +845,154 @@ function UsersPanel({
             <Row gap={space.sm} align="center" style={styles.cState}>
               <StatusDot tone={u.is_active ? 'live' : 'neutral'} />
               <Small muted>{u.is_active ? 'active' : 'disabled'}</Small>
+              <Button label="Edit" size="sm" variant="ghost" onPress={() => startEdit(u)} />
               <Button
                 label={u.is_active ? 'Disable' : 'Enable'}
                 size="sm"
                 variant="ghost"
-                onPress={() => toggleActive(u)}
-                loading={busy === u.id}
+                onPress={() => setToggleTarget(u)}
                 disabled={u.id === user?.id}
               />
             </Row>
           </View>
         ))}
       </Card>
+
+      {editing ? (
+        <Card style={{ gap: space.md }}>
+          <Row justify="space-between" align="center">
+            <SectionHeader label={`Editing ${editing.full_name}`} />
+            <Button label="Close" size="sm" variant="ghost" onPress={() => setEditing(null)} />
+          </Row>
+          <Row gap="md" wrap>
+            <View style={{ flex: 1, minWidth: 200 }}>
+              <TextField
+                label="Full name"
+                value={editForm.full_name}
+                onChangeText={(v) => setEditForm((f) => ({ ...f, full_name: v }))}
+              />
+            </View>
+            <View style={{ flex: 1, minWidth: 220 }}>
+              <TextField
+                label="Email"
+                value={editForm.email}
+                onChangeText={(v) => setEditForm((f) => ({ ...f, email: v }))}
+                autoCapitalize="none"
+              />
+            </View>
+          </Row>
+          <Stack gap={6}>
+            <Label>Role</Label>
+            <Segmented
+              size="sm"
+              value={editForm.role}
+              onChange={(v) => setEditForm((f) => ({ ...f, role: v }))}
+              options={[
+                { value: 'hospital_admin' as Role, label: 'Hospital' },
+                { value: 'dispatcher' as Role, label: 'Dispatcher' },
+                { value: 'driver' as Role, label: 'Crew' },
+                { value: 'gov_official' as Role, label: 'Govt' },
+                { value: 'platform_admin' as Role, label: 'Platform' },
+              ]}
+            />
+          </Stack>
+
+          {editForm.role === 'hospital_admin' ? (
+            <Stack gap={6}>
+              <Label>Facility</Label>
+              {facilityPickerForEdit ? (
+                <FacilityPicker
+                  facilities={facilities}
+                  districts={pickerDistricts}
+                  value={editForm.hospital_id ? Number(editForm.hospital_id) : null}
+                  title="Facility this account reports for"
+                  onPick={(id) => {
+                    setEditForm((f) => ({ ...f, hospital_id: String(id) }));
+                    setFacilityPickerForEdit(false);
+                  }}
+                  onClose={() => setFacilityPickerForEdit(false)}
+                />
+              ) : (
+                <Button
+                  label={
+                    facilities.find((f) => String(f.id) === editForm.hospital_id)?.short_name ??
+                    `Choose from ${facilities.length} facilities`
+                  }
+                  icon="hospital"
+                  variant={editForm.hospital_id ? 'secondary' : 'primary'}
+                  onPress={() => setFacilityPickerForEdit(true)}
+                />
+              )}
+            </Stack>
+          ) : null}
+
+          {editForm.role === 'dispatcher' || editForm.role === 'gov_official' ? (
+            <Stack gap={6}>
+              <Label>Jurisdiction</Label>
+              <Segmented
+                size="sm"
+                scroll
+                value={editForm.district_id}
+                onChange={(v) => setEditForm((f) => ({ ...f, district_id: v }))}
+                options={districts.map((d) => ({ value: String(d.id), label: d.name }))}
+              />
+            </Stack>
+          ) : null}
+
+          {editForm.role === 'driver' ? (
+            <Stack gap={6}>
+              <Label>Vehicle — optional, a crew account can be unlinked</Label>
+              <Segmented
+                size="sm"
+                scroll
+                value={editForm.ambulance_id || 'none'}
+                onChange={(v) => setEditForm((f) => ({ ...f, ambulance_id: v === 'none' ? '' : v }))}
+                options={[
+                  { value: 'none', label: 'No vehicle' },
+                  ...fleet.map((a) => ({ value: String(a.id), label: a.call_sign })),
+                ]}
+              />
+            </Stack>
+          ) : null}
+
+          <Row gap="sm">
+            <Button
+              label="Save changes"
+              icon="check"
+              onPress={saveEdit}
+              loading={busy === editing.id}
+              disabled={!editForm.full_name.trim() || !editForm.email.includes('@')}
+            />
+            <Button label="Cancel" variant="ghost" onPress={() => setEditing(null)} />
+          </Row>
+        </Card>
+      ) : null}
+
+      {/* #38: the disable switch used to fire on the row's own button. */}
+      <ConfirmDialog
+        visible={toggleTarget !== null}
+        tone={toggleTarget?.is_active ? 'danger' : undefined}
+        title={
+          toggleTarget
+            ? toggleTarget.is_active
+              ? `Disable ${toggleTarget.full_name}?`
+              : `Re-enable ${toggleTarget.full_name}?`
+            : 'Change account'
+        }
+        body={
+          toggleTarget?.is_active
+            ? 'They keep the record of their work and it stays in the audit log, but every open session dies at the next request and they cannot sign in again until somebody re-enables them.'
+            : 'Their existing sessions become valid again and they can sign in with their current password.'
+        }
+        confirmLabel={toggleTarget?.is_active ? 'Disable account' : 'Re-enable account'}
+        busy={toggleTarget ? busy === toggleTarget.id : false}
+        onConfirm={() => {
+          const target = toggleTarget;
+          setToggleTarget(null);
+          if (target) void confirmToggle(target);
+        }}
+        onCancel={() => setToggleTarget(null)}
+      />
 
       <Card>
         <SectionHeader label="Why this is not self-service" />
@@ -724,6 +1013,7 @@ function ConnectorsPanel({
   estate,
   templates,
   facilities,
+  districts,
   onChange,
   onFlash,
 }: {
@@ -731,6 +1021,7 @@ function ConnectorsPanel({
   estate: ConnectorEstate | null;
   templates: ConnectorTemplate[];
   facilities: Facility[];
+  districts: District[];
   onChange: () => void;
   onFlash: (f: { tone: 'live' | 'warm' | 'critical'; title: string; body?: string }) => void;
 }) {
@@ -739,6 +1030,7 @@ function ConnectorsPanel({
   const { isDesktop } = useResponsive();
 
   const [creating, setCreating] = useState(false);
+  const [connectorPickerOpen, setConnectorPickerOpen] = useState(false);
   const [facilityId, setFacilityId] = useState('');
   const [kind, setKind] = useState<'fhir_r4' | 'vendor_rest' | 'csv_sftp' | 'manual'>('fhir_r4');
   const [sourceSystem, setSourceSystem] = useState('');
@@ -749,6 +1041,34 @@ function ConnectorsPanel({
 
   const selected = facilities.find((f) => String(f.id) === facilityId);
   const selectedTemplate = templates.find((tp) => tp.kind === kind);
+
+  const verifiedFacilities = useMemo(
+    () =>
+      facilities
+        .filter((f) => f.verification === 'verified')
+        .map((f) => ({
+          id: f.id,
+          name: f.name,
+          short_name: f.short_name,
+          district_id: f.district_id,
+          district_name: f.district_name,
+          type_label: f.type_label,
+          verification: f.verification,
+          integration: f.integration,
+        })),
+    [facilities],
+  );
+
+  const pickerDistricts = useMemo(
+    () =>
+      districts.map((d) => ({
+        id: d.id,
+        name: d.name,
+        name_ta: d.name_ta ?? null,
+        facilities: d.hospital_count ?? 0,
+      })),
+    [districts],
+  );
 
   const create = useCallback(async () => {
     if (!token || !selected) return;
@@ -912,29 +1232,43 @@ function ConnectorsPanel({
             <Divider />
             <Stack gap={6}>
               <Label>Facility</Label>
-              <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-                <Row gap={space.sm}>
-                  {facilities
-                    .filter((f) => f.verification === 'verified')
-                    .map((f) => {
-                      const active = String(f.id) === facilityId;
-                      return (
-                        <Button
-                          key={f.id}
-                          label={f.short_name}
-                          size="sm"
-                          variant={active ? 'primary' : 'secondary'}
-                          onPress={() => setFacilityId(String(f.id))}
-                        />
-                      );
-                    })}
-                </Row>
-              </ScrollView>
+              {/* #20: this was every verified facility in a horizontal scroll —
+                  152 chips on the pilot dataset, and reaching the one you wanted
+                  meant dragging past the alphabet. Search plus a district filter,
+                  the same picker the rest of the console uses. */}
+              {connectorPickerOpen ? (
+                <FacilityPicker
+                  facilities={verifiedFacilities}
+                  districts={pickerDistricts}
+                  value={facilityId ? Number(facilityId) : null}
+                  title="Facility this connector reports for"
+                  onPick={(id) => {
+                    setFacilityId(String(id));
+                    setConnectorPickerOpen(false);
+                  }}
+                  onClose={() => setConnectorPickerOpen(false)}
+                />
+              ) : (
+                <Button
+                  label={
+                    selected
+                      ? `${selected.short_name} · ${selected.district_name ?? ''}`.trim()
+                      : `Choose from ${verifiedFacilities.length} verified facilities`
+                  }
+                  icon="search"
+                  variant={selected ? 'secondary' : 'primary'}
+                  onPress={() => setConnectorPickerOpen(true)}
+                />
+              )}
               {selected ? (
                 <Small muted>
                   {selected.name} · currently {selected.integration === 'api' ? 'API' : 'manual entry'}
                 </Small>
-              ) : null}
+              ) : (
+                <Small muted>
+                  A connector is bound to one facility and can only write that facility's figures.
+                </Small>
+              )}
             </Stack>
 
             <Stack gap={6}>
@@ -1166,40 +1500,66 @@ function ComplaintsPanel({
   const { isDesktop } = useResponsive();
   const [busy, setBusy] = useState<number | null>(null);
   const [onlyOpen, setOnlyOpen] = useState(true);
+  // The complaint being closed, with the reviewer's decision attached. Null when
+  // nothing is open.
+  const [closing, setClosing] = useState<{
+    complaint: Complaint;
+    outcome: 'upheld' | 'dismissed' | 'under_review';
+    note: string;
+  } | null>(null);
 
   const rows = useMemo(
     () => complaints.filter((c) => (onlyOpen ? c.status === 'open' : true)),
     [complaints, onlyOpen],
   );
 
-  const resolve = useCallback(
-    async (c: Complaint) => {
-      if (!token) return;
-      setBusy(c.id);
-      try {
-        await api.post(
-          `/governance/feedback/${c.id}/resolve`,
-          { resolution: 'resolved', note: 'Confirmed against the facility bed-control desk' },
-          { token },
-        );
-        onFlash({
-          tone: 'live',
-          title: `Complaint against ${c.hospital_name} closed`,
-          body: 'It no longer counts against the facility\u2019s trust score.',
-        });
-        onChange();
-      } catch (err) {
-        onFlash({
-          tone: 'critical',
-          title: 'Could not close the complaint',
-          body: err instanceof ApiError ? err.message : undefined,
-        });
-      } finally {
-        setBusy(null);
-      }
-    },
-    [token, onChange, onFlash],
-  );
+  /**
+   * Close a complaint, with the decision the reviewer actually made.
+   *
+   * The old handler sent a fixed `{resolution: "resolved"}` with the note
+   * "Confirmed against the facility bed-control desk" and a button that said
+   * "Mark resolved" — so every complaint in the pilot's audit trail claimed the
+   * same investigation, whether or not there had been one. A report that is
+   * upheld costs the facility trust score and one that is dismissed does not,
+   * and that distinction is the entire point of the record.
+   */
+  const submitResolution = useCallback(async () => {
+    if (!token || !closing) return;
+    const { complaint, outcome, note } = closing;
+    setBusy(complaint.id);
+    try {
+      await api.post(
+        `/governance/feedback/${complaint.id}/resolve`,
+        { status: outcome, resolution_note: note.trim() || null },
+        { token },
+      );
+      onFlash({
+        tone: outcome === 'upheld' ? 'warm' : 'live',
+        title:
+          outcome === 'upheld'
+            ? `Upheld — ${complaint.hospital_name} is penalised`
+            : outcome === 'dismissed'
+              ? `Dismissed — ${complaint.hospital_name} is cleared`
+              : `Left under review`,
+        body:
+          outcome === 'upheld'
+            ? 'An upheld report continues to count against the facility trust score.'
+            : outcome === 'dismissed'
+              ? 'It no longer counts against the facility trust score.'
+              : 'The report stays open against the facility until it is decided.',
+      });
+      setClosing(null);
+      onChange();
+    } catch (err) {
+      onFlash({
+        tone: 'critical',
+        title: 'Could not close the complaint',
+        body: err instanceof ApiError ? err.message : undefined,
+      });
+    } finally {
+      setBusy(null);
+    }
+  }, [token, closing, onChange, onFlash]);
 
   if (!complaints.length) {
     return (
@@ -1254,10 +1614,12 @@ function ComplaintsPanel({
             </Stack>
             {c.status === 'open' ? (
               <Button
-                label="Mark resolved"
+                label="Review & close"
                 icon="check"
                 variant="secondary"
-                onPress={() => resolve(c)}
+                onPress={() =>
+                  setClosing({ complaint: c, outcome: 'upheld', note: '' })
+                }
                 loading={busy === c.id}
               />
             ) : (
@@ -1269,6 +1631,58 @@ function ComplaintsPanel({
           </Row>
         </Card>
       ))}
+
+      {/* The resolution form. Closing a report is a decision about a facility's
+          trust score, so it asks which decision: upheld costs them, dismissed
+          clears them, and the note is what the next reviewer reads. */}
+      <ConfirmDialog
+        visible={closing !== null}
+        title={closing ? `Close the report against ${closing.complaint.hospital_name}` : 'Close report'}
+        body={
+          closing ? (
+            <Stack gap={space.sm}>
+              <Small muted style={{ fontSize: 12 }}>
+                “{closing.complaint.comment || 'No detail supplied.'}”
+              </Small>
+              <Label>Outcome</Label>
+              <Segmented
+                size="sm"
+                scroll
+                value={closing.outcome}
+                onChange={(v) => setClosing((prev) => (prev ? { ...prev, outcome: v } : prev))}
+                options={[
+                  { value: 'upheld', label: 'Upheld' },
+                  { value: 'dismissed', label: 'Dismissed' },
+                  { value: 'under_review', label: 'Under review' },
+                ]}
+              />
+              <Small muted style={{ fontSize: 11.5 }}>
+                {closing.outcome === 'upheld'
+                  ? 'The report stands. It continues to count against the facility trust score.'
+                  : closing.outcome === 'dismissed'
+                    ? 'The report was checked and found wrong. It stops counting against the score.'
+                    : 'Keep it open pending the facility\u2019s response.'}
+              </Small>
+            </Stack>
+          ) : null
+        }
+        confirmLabel="Record decision"
+        busy={closing ? busy === closing.complaint.id : false}
+        onConfirm={submitResolution}
+        onCancel={() => setClosing(null)}
+      >
+        {closing ? (
+          <TextField
+            label="How was it checked?"
+            value={closing.note}
+            onChangeText={(v) => setClosing((prev) => (prev ? { ...prev, note: v } : prev))}
+            placeholder="e.g. rung the bed-control desk; they had four beds free and the listing was stale"
+            multiline
+            maxLength={300}
+            hint="Read by the next reviewer and written to the audit trail."
+          />
+        ) : null}
+      </ConfirmDialog>
     </Stack>
   );
 }
@@ -1283,11 +1697,26 @@ function ComplaintsPanel({
  *
  * Read-only, deliberately. An editable audit log is not an audit log.
  */
-function AuditPanel({ entries }: { entries: AuditEntry[] }) {
+function AuditPanel({
+  entries,
+  total,
+  hasMore,
+  onLoadMore,
+}: {
+  entries: AuditEntry[];
+  total: number;
+  hasMore: boolean;
+  onLoadMore: () => Promise<void>;
+}) {
   const { t } = useTheme();
   const { isDesktop } = useResponsive();
   const [action, setAction] = useState<string>('all');
   const [query, setQuery] = useState('');
+  const [paging, setPaging] = useState(false);
+  // How many of the fetched rows are on screen. The list used to be cut at 250
+  // without a word; now the page size is ours to set and the control says how
+  // many are left, so "there is more" is never something the reader has to infer.
+  const [shown, setShown] = useState(50);
 
   const families = useMemo(() => {
     const seen = new Map<string, number>();
@@ -1306,6 +1735,16 @@ function AuditPanel({ entries }: { entries: AuditEntry[] }) {
       return true;
     });
   }, [entries, action, query]);
+
+  // A filter change is a new question, so the list starts again from the top
+  // rather than keeping a page depth that no longer means anything.
+  useEffect(() => {
+    setShown(50);
+  }, [action, query]);
+
+  const page = rows.slice(0, shown);
+  const remaining = rows.length - page.length;
+  const reachable = total - entries.length;
 
   return (
     <Stack gap={space.lg}>
@@ -1357,7 +1796,7 @@ function AuditPanel({ entries }: { entries: AuditEntry[] }) {
         {rows.length === 0 ? (
           <EmptyState icon="activity" title="Nothing matches" body="Widen the time window or clear the filter." />
         ) : (
-          rows.slice(0, 250).map((e, i) => (
+          page.map((e, i) => (
             <View
               key={e.id}
               style={[
@@ -1395,6 +1834,52 @@ function AuditPanel({ entries }: { entries: AuditEntry[] }) {
             </View>
           ))
         )}
+
+        {/* Paging control. Two distinct "more": rows already fetched and hidden,
+            and rows the server has that we have not asked for yet. The reader is
+            told which, because the two cost different things to get. */}
+        {(remaining > 0 || (hasMore && reachable > 0)) && !query ? (
+          <Row
+            justify="space-between"
+            align="center"
+            gap={space.md}
+            wrap
+            style={{ paddingHorizontal: space.lg, paddingVertical: space.md }}
+          >
+            <Small muted style={{ fontSize: 11.5 }}>
+              Showing {page.length} of {total.toLocaleString()} entries in this window
+              {reachable > 0 && hasMore ? ` · ${reachable.toLocaleString()} not yet fetched` : ''}
+            </Small>
+            <Row gap={space.sm}>
+              {remaining > 0 ? (
+                <Button
+                  label={`Show ${Math.min(50, remaining)} more`}
+                  size="sm"
+                  variant="secondary"
+                  onPress={() => setShown((v) => v + 50)}
+                />
+              ) : null}
+              {hasMore && reachable <= 0 ? (
+                <Button
+                  label="Fetch older entries"
+                  size="sm"
+                  variant="secondary"
+                  icon="chevronDown"
+                  loading={paging}
+                  onPress={async () => {
+                    setPaging(true);
+                    try {
+                      await onLoadMore();
+                      setShown((v) => v + 50);
+                    } finally {
+                      setPaging(false);
+                    }
+                  }}
+                />
+              ) : null}
+            </Row>
+          </Row>
+        ) : null}
       </Card>
     </Stack>
   );

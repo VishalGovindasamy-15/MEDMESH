@@ -19,6 +19,13 @@ const PATHS: Record<string, string> = {
   chevronRight: 'M9.5 6l6 6-6 6',
   chevronLeft: 'M14.5 6l-6 6 6 6',
   chevronDown: 'M6 9.5l6 6 6-6',
+  chevronUp: 'M6 14.5l6-6 6 6',
+  more: 'M6 12h.01M12 12h.01M18 12h.01',
+  moreHorizontal: 'M6 12h.01M12 12h.01M18 12h.01',
+  keyboard: 'M3 6.5h18v11H3zM7 10h.01M11 10h.01M15 10h.01M7.5 14h9',
+  crosshair: 'M12 3v3M12 18v3M3 12h3M18 12h3M12 19a7 7 0 1 0 0-14 7 7 0 0 0 0 14ZM12 14.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Z',
+  siren: 'M12 3a5 5 0 0 0-5 5v6h10V8a5 5 0 0 0-5-5ZM4 18h16M6.5 21h11',
+  phoneOff: 'M3 3l18 18M6.6 6.7a15 15 0 0 0 10.7 10.7M9.5 4.6 8 3.2a1.6 1.6 0 0 0-2.2.1L4.4 4.8c-.9.9-1.2 2.3-.6 3.4',
   alert: 'M12 8v5M12 16.6v.1M10.3 3.7 2.6 17a2 2 0 0 0 1.7 3h15.4a2 2 0 0 0 1.7-3L13.7 3.7a2 2 0 0 0-3.4 0Z',
   clock: 'M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18ZM12 7v5.2l3.4 2',
   phone:

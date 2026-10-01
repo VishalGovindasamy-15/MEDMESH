@@ -77,7 +77,11 @@ export default function DirectoryScreen() {
   const [filter, setFilter] = useState<FilterKey>('all');
   const [districtId, setDistrictId] = useState<number | null>(null);
   const [districtPickerOpen, setDistrictPickerOpen] = useState(false);
-  const [showMap, setShowMap] = useState(true);
+  // #22: on a phone the map used to open first and full-width, pushing the
+  // search box, the filters and the first hospital below the fold — the reader
+  // who came for "where can I go right now" got scenery. Desktop keeps it open;
+  // a phone starts with the list and the map is one tap away.
+  const [showMap, setShowMap] = useState(!isPhone);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -121,12 +125,80 @@ export default function DirectoryScreen() {
     });
   }, [facilities, liveFacilities]);
 
-  const filtered = useMemo(() => {
+  /**
+   * The directory narrowed by district and search only — the scope a filter
+   * count is supposed to describe.
+   *
+   * A facet count has to be computed over the list the facet will act on, with
+   * the facet itself excluded. Counting the ICU filter over the raw directory
+   * meant the badge read "ICU 96" while the reader was looking at a district
+   * with nine hospitals in it, and counting it over `filtered` instead would
+   * make the number collapse the moment you selected it. This is the middle
+   * list: everything the reader has already chosen, before the chip.
+   */
+  /**
+   * Everything a search term is allowed to match (#51).
+   *
+   * The search used to look at the name, the short name and the street address,
+   * which is what a gazetteer searches — not what somebody looking for care
+   * searches. "snakebite Pollachi" is a capability and a place; "trauma centre
+   * government" is a capability and an ownership; neither found anything here.
+   * So the haystack now carries the district, the ownership label, the
+   * specialties the facility declares, and a plain-language line per capability,
+   * plus a few synonyms the field actually uses ("snakebite" for antivenom,
+   * "nicu" for neonatal intensive care).
+   */
+  const haystack = useMemo(() => {
+    const capabilityWords = (f: Facility) =>
+      [
+        f.capabilities.blood_bank ? 'blood bank transfusion' : '',
+        f.capabilities.trauma_centre ? 'trauma centre accident injury' : '',
+        f.capabilities.cath_lab ? 'cath lab cardiac catheterisation angioplasty heart' : '',
+        f.capabilities.burn_unit ? 'burns burn unit fire scald' : '',
+        f.capabilities.dialysis ? 'dialysis renal kidney' : '',
+        f.capabilities.neonatal_icu ? 'neonatal icu nicu newborn baby premature' : '',
+        (f.capacity?.antivenom_vials ?? 0) > 0 ? 'antivenom snakebite snake bite venom' : '',
+        (f.capacity?.blood_units ?? 0) > 0 ? 'blood units stocked' : '',
+      ]
+        .filter(Boolean)
+        .join(' ');
+    const map = new Map<number, string>();
+    merged.forEach((f) => {
+      map.set(
+        f.id,
+        [
+          f.name,
+          f.short_name,
+          f.address,
+          f.district_name ?? '',
+          f.type_label,
+          f.specialties.join(' ').replace(/_/g, ' '),
+          capabilityWords(f),
+        ]
+          .join(' ')
+          .toLowerCase(),
+      );
+    });
+    return map;
+  }, [merged]);
+
+  const scoped = useMemo(() => {
     const q = query.trim().toLowerCase();
     return merged.filter((f) => {
       if (districtId && f.district_id !== districtId) return false;
-      if (q && !`${f.name} ${f.short_name} ${f.address}`.toLowerCase().includes(q)) return false;
+      if (q) {
+        // Every word of the query has to land somewhere, in any order, so a
+        // capability plus a place works without either being a prefix of the
+        // other.
+        const hay = haystack.get(f.id) ?? '';
+        if (!q.split(/\s+/).every((word) => hay.includes(word))) return false;
+      }
+      return true;
+    });
+  }, [merged, query, districtId, haystack]);
 
+  const filtered = useMemo(() => {
+    return scoped.filter((f) => {
       const cap = f.capacity;
       switch (filter) {
         case 'icu':
@@ -150,7 +222,7 @@ export default function DirectoryScreen() {
           return true;
       }
     });
-  }, [merged, query, filter, districtId]);
+  }, [scoped, filter]);
 
   /**
    * The headline figures.
@@ -185,6 +257,27 @@ export default function DirectoryScreen() {
       icu: withData.reduce((sum, f) => sum + (f.capacity!.icu_effective ?? 0), 0),
     };
   }, [merged]);
+
+  /**
+   * One count per filter chip, over the scoped list.
+   *
+   * The chips previously carried no count at all except ICU, which is what made
+   * the one wrong count so conspicuous: a reader toggling a filter had no way to
+   * tell whether selecting it would leave nine hospitals or none.
+   */
+  const facetCounts = useMemo(() => {
+    const has = (fn: (f: (typeof scoped)[number]) => boolean) => scoped.filter(fn).length;
+    return {
+      icu: has((f) => (f.capacity?.icu_effective ?? 0) > 0),
+      ventilator: has((f) => (f.capacity?.vent_effective ?? 0) > 0),
+      trauma: has((f) => f.capabilities.trauma_centre),
+      blood: has((f) => (f.capacity?.blood_units ?? 0) > 0),
+      antivenom: has((f) => (f.capacity?.antivenom_vials ?? 0) > 0),
+      public: has((f) => f.type === 'public'),
+      private: has((f) => f.type === 'private'),
+      all: scoped.length,
+    } as Record<FilterKey, number>;
+  }, [scoped]);
 
   const selectedDistrict = districtId ? districts.find((d) => d.id === districtId) : null;
 
@@ -367,12 +460,9 @@ export default function DirectoryScreen() {
             options={FILTERS.map((f) => ({
               value: f.value,
               label: tr(f.key),
-              count:
-                f.value === 'all'
-                  ? undefined
-                  : f.value === 'icu'
-                    ? merged.filter((x) => (x.capacity?.icu_effective ?? 0) > 0).length
-                    : undefined,
+              // Counted over `scoped`, so the badge describes the list the chip
+              // will produce rather than the state's whole directory. (#21)
+              count: f.value === 'all' ? scoped.length : facetCounts[f.value],
             }))}
             value={filter}
             onChange={setFilter}

@@ -14,6 +14,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from .services.lifecycle import duty_is_current
 from .models import (
     Ambulance,
     BedHold,
@@ -246,7 +247,14 @@ def hospital_directory(db: Session, *, district_id: int | None = None) -> list[H
 
 
 def on_duty_doctors(db: Session, *, hospital_ids: list[int] | None = None) -> list[Doctor]:
-    stmt = select(Doctor).where(Doctor.on_duty.is_(True))
+    """Clinicians actually on duty, meaning the window has not elapsed.
+
+    `duty_is_current()` rather than the bare flag: the matching engine ranks a
+    facility partly on whether a specialist for this presentation is present, and
+    a stale flag is the difference between a cardiac case going to a hospital
+    with a cardiologist and going to one with an empty office.
+    """
+    stmt = select(Doctor).where(duty_is_current())
     if hospital_ids is not None:
         if not hospital_ids:
             return []

@@ -21,8 +21,9 @@ from ..models import District, Doctor, Hospital, User, UserRole, utcnow
 from ..repository import latest_capacity_map
 from ..schemas import DoctorCreate, DoctorDutyUpdate, DoctorUpdate
 from ..security import CurrentUser, OptionalUser, require_roles
-from ..services import audit
+from ..services import audit, lifecycle
 from ..services.references import SPECIALTY_KEYS, SPECIALTY_LABELS, canonical_specialty
+from ..services.lifecycle import duty_is_current
 from ..services.trust import freshness, humanise_age
 
 router = APIRouter(prefix="/doctors", tags=["doctors"])
@@ -79,13 +80,18 @@ SHIFT_WINDOWS = {
 
 
 def _doctor_out(doctor: Doctor, hospital: Hospital | None, district: District | None) -> dict:
-    duty_state = "off_duty"
-    if doctor.on_duty:
-        if doctor.duty_end is None:
-            duty_state = "on_duty"
-        else:
-            secs = int((doctor.duty_end - utcnow()).total_seconds())
-            duty_state = "on_duty" if secs > 0 else "shift_ended"
+    """One clinician as every surface should see them.
+
+    `on_duty` here is the *effective* answer, not the stored flag. A consultant
+    whose window ended at 20:00 and whose row has not been swept yet is off duty,
+    and this reports them as off duty -- the roster sweep is a tidy-up, not the
+    thing that makes the statement true. The stored flag is still exposed as
+    `roster_flag` for the roster screen, which is the one place where the
+    difference between "somebody said on duty" and "is on duty" is meaningful.
+    """
+    state = lifecycle.duty_state(doctor)
+    remaining = lifecycle.minutes_until_duty_end(doctor)
+    on_now = state == "on_duty"
 
     return {
         "id": doctor.id,
@@ -95,13 +101,17 @@ def _doctor_out(doctor: Doctor, hospital: Hospital | None, district: District | 
         "specialty_label": doctor.specialty.replace("_", " ").title(),
         "department": doctor.department,
         "designation": doctor.designation,
-        "on_duty": doctor.on_duty,
-        "duty_state": duty_state,
+        "on_duty": on_now,
+        "roster_flag": doctor.on_duty,
+        "duty_state": state,
         "shift": doctor.shift,
         "shift_window": doctor.shift_window
         or "%02d:00–%02d:00" % SHIFT_WINDOWS.get(doctor.shift, (0, 24)),
         "duty_end": doctor.duty_end.isoformat() + "Z" if doctor.duty_end else None,
-        "minutes_remaining": max(0, int((doctor.duty_end - utcnow()).total_seconds() // 60)) if doctor.duty_end else None,
+        # Signed: negative means the window has passed. A caller showing a
+        # countdown needs to distinguish "ends in 4 minutes" from "ended 4
+        # minutes ago", and a clamped zero cannot express the second.
+        "minutes_remaining": remaining,
         "accepts_emergency": doctor.accepts_emergency,
         "languages": [x.strip() for x in (doctor.languages or "").split(",") if x.strip()],
         "last_toggled_at": doctor.last_toggled_at.isoformat() + "Z" if doctor.last_toggled_at else None,
@@ -142,7 +152,11 @@ def search_doctors(
     if hospital_id:
         stmt = stmt.where(Doctor.hospital_id == hospital_id)
     if on_duty_only:
-        stmt = stmt.where(Doctor.on_duty.is_(True))
+        # Effective duty, not the stored flag. This is the query behind the
+        # public directory and behind the citizen's question "is there really a
+        # cardiologist on duty at 2 a.m." -- the one place where answering from
+        # a flag that expired six hours ago is the whole failure.
+        stmt = stmt.where(duty_is_current())
     if accepts_emergency is not None:
         stmt = stmt.where(Doctor.accepts_emergency.is_(accepts_emergency))
     if q:
@@ -514,19 +528,18 @@ def rollover_shifts(
     """Ends duty windows that have elapsed.
 
     Without this a night-shift consultant stays 'on duty' through the following
-    afternoon and the public directory quietly lies. A scheduler calls it every
-    five minutes in production.
+    afternoon and the public directory quietly lies.
+
+    The sweep is no longer what makes the answer correct -- every read applies
+    `duty_is_current()` -- but it is still worth running, because it converges
+    the stored flag and publishes the duty-change event that tells connected
+    clients to re-render. A background loop in `services/roster.py` calls this
+    path every five minutes; the endpoint stays available so an operator can
+    force it after correcting a roster.
     """
     now = utcnow()
-    ended = 0
-    closed: list[Doctor] = []
-    for doctor in db.execute(select(Doctor).where(Doctor.on_duty.is_(True))).scalars().all():
-        if doctor.duty_end and doctor.duty_end <= now:
-            doctor.on_duty = False
-            doctor.duty_start = None
-            doctor.duty_end = None
-            ended += 1
-            closed.append(doctor)
+    closed = lifecycle.rollover_expired_duty(db)
+    ended = len(closed)
     audit.record(
         db,
         action="doctor.rollover",

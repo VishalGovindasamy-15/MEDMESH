@@ -1,6 +1,7 @@
 import React from 'react';
 import {
   ActivityIndicator,
+  Modal,
   Platform,
   Pressable,
   ScrollView,
@@ -618,6 +619,145 @@ export function TextField({
       </View>
       {hint ? <Text style={[typeScale.nano, { color: t.fg.faint }]}>{hint}</Text> : null}
     </View>
+  );
+}
+
+/**
+ * A confirmation step before an action that cannot be taken back.
+ *
+ * Two things are true of every destructive control in an ops console: it sits
+ * next to the control that does the safe thing, and the person pressing it is
+ * holding a phone call. Committing a unit, withdrawing a destination, taking an
+ * account out of service -- each of those is a single misclick away from the
+ * button beside it, and each is expensive to undo. This is the shared step.
+ *
+ * When `requireReason` is set the dialog also collects a short justification and
+ * refuses to confirm until it is long enough to be useful. An override that the
+ * audit trail records as "operator override" records nothing; the point of the
+ * trail is that somebody reviewing it later can see what the operator knew that
+ * the engine did not.
+ */
+export function ConfirmDialog({
+  visible,
+  title,
+  body,
+  confirmLabel = 'Confirm',
+  cancelLabel = 'Cancel',
+  tone = 'primary',
+  busy = false,
+  requireReason = false,
+  reasonLabel = 'Reason',
+  reasonHint,
+  reasonMinLength = 12,
+  onConfirm,
+  onCancel,
+  children,
+}: {
+  visible: boolean;
+  title: string;
+  body?: React.ReactNode;
+  confirmLabel?: string;
+  cancelLabel?: string;
+  tone?: 'primary' | 'danger';
+  busy?: boolean;
+  requireReason?: boolean;
+  reasonLabel?: string;
+  reasonHint?: string;
+  reasonMinLength?: number;
+  onConfirm: (reason?: string) => void;
+  onCancel: () => void;
+  children?: React.ReactNode;
+}) {
+  const { t } = useTheme();
+  const [reason, setReason] = React.useState('');
+
+  // A fresh dialog must not arrive pre-filled with the last one's justication.
+  React.useEffect(() => {
+    if (visible) setReason('');
+  }, [visible, title]);
+
+  const short = requireReason && reason.trim().length < reasonMinLength;
+
+  return (
+    <Modal visible={visible} transparent animationType="fade" onRequestClose={onCancel}>
+      <View
+        style={{
+          flex: 1,
+          backgroundColor: 'rgba(6, 10, 15, 0.62)',
+          alignItems: 'center',
+          justifyContent: 'center',
+          padding: space.lg,
+        }}
+      >
+        <View
+          style={{
+            width: '100%',
+            maxWidth: 460,
+            backgroundColor: t.bg.surface,
+            borderRadius: radius.lg,
+            borderWidth: StyleSheet.hairlineWidth,
+            borderColor: t.line.strong,
+            padding: space.lg,
+            gap: space.md,
+          }}
+        >
+          <Row gap="sm" align="center">
+            <Icon
+              name={tone === 'danger' ? 'alert' : 'check'}
+              size={16}
+              color={tone === 'danger' ? t.status.critical.base : t.accent.base}
+            />
+            <Heading style={{ flex: 1 }}>{title}</Heading>
+          </Row>
+
+          {body ? (
+            typeof body === 'string' ? (
+              <Body muted style={{ fontSize: 13, lineHeight: 19 }}>
+                {body}
+              </Body>
+            ) : (
+              body
+            )
+          ) : null}
+
+          {children}
+
+          {requireReason ? (
+            <TextField
+              label={reasonLabel}
+              value={reason}
+              onChangeText={setReason}
+              placeholder="e.g. caller confirmed the patient is on a ventilator"
+              multiline
+              maxLength={200}
+              hint={reasonHint ?? `Recorded against your account. ${reasonMinLength} characters minimum.`}
+            />
+          ) : null}
+
+          <Row gap="sm" justify="flex-end" wrap>
+            <Button label={cancelLabel} variant="ghost" onPress={onCancel} disabled={busy} />
+            <Button
+              label={confirmLabel}
+              variant={tone === 'danger' ? 'danger' : 'primary'}
+              onPress={() => onConfirm(requireReason ? reason.trim() : undefined)}
+              loading={busy}
+              disabled={busy || short}
+              icon={tone === 'danger' ? 'alert' : 'check'}
+            />
+          </Row>
+
+          {requireReason && short ? (
+            <Small muted style={{ fontSize: 11.5 }}>
+              {reason.trim().length === 0
+                ? 'A reason is required — this action is recorded in the audit trail.'
+                : `${reasonMinLength - reason.trim().length} more character${
+                    reasonMinLength - reason.trim().length === 1 ? '' : 's'
+                  } needed.`}
+            </Small>
+          ) : null}
+        </View>
+      </View>
+    </Modal>
   );
 }
 

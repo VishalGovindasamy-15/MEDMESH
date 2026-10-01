@@ -642,6 +642,12 @@ class Feedback(Base):
     comment: Mapped[str] = mapped_column(String(400), default="")
     status: Mapped[FeedbackStatus] = mapped_column(enum_col(FeedbackStatus), default=FeedbackStatus.OPEN)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    # The reviewer's decision note lives on the report, not in the audit log:
+    # the audit trail records *that* a report was upheld and by whom, and the
+    # reasoning sits with the report it reasons about (#53).
+    resolution_note: Mapped[str | None] = mapped_column(String(300))
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime)
+    resolved_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
 
     __table_args__ = (UniqueConstraint("hospital_id", "incident_id", name="uq_feedback_incident"),)
 

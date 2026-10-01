@@ -47,6 +47,8 @@ from ..schemas import CapacityPush, HospitalCreate, QuickAdjust, VerificationUpd
 from ..security import CurrentUser, OptionalUser, require_roles
 from ..services import audit
 from ..services import trust as trust_engine
+from ..services import lifecycle
+from ..services.lifecycle import duty_is_current
 from ..services.geo import estimate_leg
 
 router = APIRouter(prefix="/hospitals", tags=["hospitals"])
@@ -99,6 +101,34 @@ def hospital_card(hospital: Hospital, cap: CapacityView | None, trust: dict | No
         },
         "capacity": cap.to_wire() if cap else None,
         "trust": trust,
+    }
+
+
+def _on_duty_summary(db: Session, hospital: Hospital) -> dict:
+    """Clinician cover at one facility: counts, specialties, emergency capability.
+
+    Counts and specialty names only -- no clinician is identified on a directory
+    listing. A family choosing where to take a snakebite needs to know the
+    facility has a physician on duty who handles antivenom, not the name of the
+    doctor, and the directory should not be a way to enumerate staff.
+
+    A facility that has opted out of publishing its roster returns zeros rather
+    than nothing, because a caller has to be able to distinguish "nobody on duty"
+    from "this field was not sent".
+    """
+    if hospital.expose_doctor_directory is False:
+        return {"available": False, "on_duty": 0, "accepting_emergency": 0, "specialties": [], "withheld": True}
+
+    rows = db.execute(
+        select(Doctor).where(Doctor.hospital_id == hospital.id, duty_is_current())
+    ).scalars().all()
+    specialties = sorted({(d.specialty or "").replace("_", " ") for d in rows if d.specialty})
+    return {
+        "available": True,
+        "on_duty": len(rows),
+        "accepting_emergency": sum(1 for d in rows if d.accepts_emergency),
+        "specialties": specialties[:8],
+        "withheld": False,
     }
 
 
@@ -218,6 +248,12 @@ def list_hospitals(
         card["district_name"] = district_names.get(h.district_id, "")
         card["latest_record"] = _record_view(rows.get(h.id))
         card["holds"] = holds
+        # Who is actually here. The directory row showed beds, ICU, ventilators,
+        # ED state and trust but never the answer a family rings ahead to ask:
+        # is there a specialist on duty tonight. Derived from the same effective
+        # duty predicate the directory search uses, so a card and the roster
+        # behind it cannot disagree.
+        card["doctors"] = _on_duty_summary(db, h)
         cards.append(card)
 
     # Rank: facilities that can actually take someone right now float to the top,
@@ -376,6 +412,10 @@ def hospital_detail(hospital_id: int, user: OptionalUser, db: Session = Depends(
             }
             for r in series
         ],
+        # Presence, not just a row from the roster. The `on_duty` returned here
+        # is the effective answer -- expiry applied -- so a page that renders it
+        # cannot advertise a shift that ended; `roster_flag` is the stored value
+        # for the one screen that needs to show the difference.
         "doctors_on_duty": [
             {
                 "id": d.id,
@@ -386,9 +426,13 @@ def hospital_detail(hospital_id: int, user: OptionalUser, db: Session = Depends(
                 "shift": d.shift,
                 "accepts_emergency": d.accepts_emergency,
                 "duty_end": d.duty_end.isoformat() + "Z" if d.duty_end else None,
+                "on_duty": lifecycle.duty_state(d) == "on_duty",
+                "roster_flag": d.on_duty,
+                "duty_state": lifecycle.duty_state(d),
+                "minutes_remaining": lifecycle.minutes_until_duty_end(d),
             }
             for d in db.execute(
-                select(Doctor).where(Doctor.hospital_id == hospital.id, Doctor.on_duty.is_(True))
+                select(Doctor).where(Doctor.hospital_id == hospital.id, duty_is_current())
             ).scalars().all()
         ],
         # A hold row is what the receiving ward actually acts on, so it carries

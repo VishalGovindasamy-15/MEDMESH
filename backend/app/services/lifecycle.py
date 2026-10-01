@@ -36,7 +36,9 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from ..models import AmbulanceStatus, Incident, IncidentStatus
+from sqlalchemy import and_, or_, select
+
+from ..models import AmbulanceStatus, Doctor, Incident, IncidentStatus, utcnow
 
 # --------------------------------------------------------------------------- #
 # Vocabulary
@@ -146,6 +148,26 @@ PATIENT_ABOARD = (IncidentStatus.PATIENT_ONBOARD, IncidentStatus.TRANSPORTING)
 
 #: States where the trip is over.
 TERMINAL_STATES = (IncidentStatus.HANDED_OVER, IncidentStatus.CLOSED, IncidentStatus.CANCELLED)
+
+#: States in which an ambulance is committed to a case. Everything the crew app
+#: does -- showing the trip, reporting position, offering the next stage --
+#: keys off this, and so does the console's picture of where its units are.
+#:
+#: This exists because it was written out by hand in several places and one of
+#: them was wrong: `/crew/assignment` listed DISPATCHED, EN_ROUTE and a
+#: deprecated ARRIVED, so a driver who reached the scene and refreshed was told
+#: "Standing by" while actually transporting a patient. The app then stopped
+#: reporting position, because telemetry is tied to there being an assignment,
+#: and the console watched a unit sit still on the way to hospital. A trip is
+#: live from dispatch until handover and nowhere in between is a gap.
+ACTIVE_TRIP_STATES = (
+    IncidentStatus.DISPATCHED,
+    IncidentStatus.EN_ROUTE,
+    IncidentStatus.AT_SCENE,
+    IncidentStatus.PATIENT_ONBOARD,
+    IncidentStatus.TRANSPORTING,
+    IncidentStatus.AT_HOSPITAL,
+)
 
 #: Incident status -> the state the assigned vehicle should be in.
 AMBULANCE_FOR_STATUS: dict[IncidentStatus, AmbulanceStatus] = {
@@ -270,3 +292,82 @@ def intervals(incident: Incident) -> dict[str, float | None]:
         "handover_seconds": gap("hospital_arrived_at", "handed_over_at"),
         "total_seconds": gap("created_at", "handed_over_at"),
     }
+
+
+# --------------------------------------------------------------------------- #
+# Doctor duty
+#
+# The roster's `on_duty` flag is a *statement somebody made*, and its `duty_end`
+# is when that statement stops being true. Reading only the flag means the
+# public directory keeps advertising a cardiologist through the afternoon after a
+# night shift ended, which is precisely the claim a citizen checks the directory
+# to verify. There is a `/doctors/roster/rollover` endpoint that clears expired
+# windows, but nothing in the pilot called it: the comment saying "a scheduler
+# calls it every five minutes in production" was aspirational.
+#
+# Two fixes, because either alone is insufficient:
+#
+#   * `duty_is_current()` -- the predicate every read applies, so an expired
+#     window is never treated as a live one even if the row has not been swept.
+#   * `rollover_expired_duty()` -- the sweep, now actually run by a background
+#     loop (see `services/roster.py`), so the stored flag converges and the
+#     duty-change event is published.
+# --------------------------------------------------------------------------- #
+
+def duty_is_current(now: datetime | None = None):
+    """SQL predicate: the doctor is on duty *and* the window has not elapsed.
+
+    Returns a SQLAlchemy condition rather than a Python callable so it composes
+    into any query. `duty_end IS NULL` means an open-ended duty -- a consultant
+    who has not been given an end time is on until somebody says otherwise, which
+    is the honest reading of a null.
+    """
+    moment = now or utcnow()
+    return and_(
+        Doctor.on_duty.is_(True),
+        or_(Doctor.duty_end.is_(None), Doctor.duty_end > moment),
+    )
+
+
+def duty_state(doctor: Doctor, now: datetime | None = None) -> str:
+    """How to describe this clinician's availability right now.
+
+    One vocabulary, used by the directory, the facility page, the roster and the
+    matching engine, so a facility cannot be "on duty" in one view and "expired"
+    in another.
+    """
+    moment = now or utcnow()
+    if not doctor.on_duty:
+        return "off_duty"
+    if doctor.duty_end is None:
+        return "on_duty"
+    return "on_duty" if doctor.duty_end > moment else "expired"
+
+
+def minutes_until_duty_end(doctor: Doctor, now: datetime | None = None) -> int | None:
+    """Minutes left in the window, or None for an open-ended duty.
+
+    Negative once elapsed, because a caller deciding whether to trust the flag
+    needs to know how far past the end it is, not just that it is past.
+    """
+    if doctor.duty_end is None:
+        return None
+    moment = now or utcnow()
+    return int((doctor.duty_end - moment).total_seconds() // 60)
+
+
+def rollover_expired_duty(db) -> list:
+    """Clear elapsed duty windows and return the doctors whose state changed.
+
+    The caller commits and publishes; this function only mutates, so a caller
+    that wants the audit entry and the announcement to land together can do that.
+    """
+    now = utcnow()
+    changed = []
+    for doctor in db.execute(select(Doctor).where(Doctor.on_duty.is_(True))).scalars().all():
+        if doctor.duty_end is not None and doctor.duty_end <= now:
+            doctor.on_duty = False
+            doctor.duty_start = None
+            doctor.duty_end = None
+            changed.append(doctor)
+    return changed

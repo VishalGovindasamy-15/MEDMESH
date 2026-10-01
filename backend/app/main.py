@@ -117,9 +117,13 @@ async def lifespan(app: FastAPI):
     _bootstrap()
     _warm_projection()
 
+    from .services.roster import start_background_loops as start_roster_loop
     from .simulator import start_background_loops
 
-    tasks = await start_background_loops()
+    # Two independent loops: the simulator synthesises capacity reports and the
+    # roster sweep converges duty windows. They share a start-up hook because a
+    # pilot has no job runner, not because they are related.
+    tasks = await start_background_loops() + await start_roster_loop()
     app.state.background_tasks = tasks
     log.info("MedMesh API ready — %d facilities, %d subscribers", len(list(live_store.all())), live_store.subscriber_count)
     try:
@@ -202,6 +206,10 @@ def status() -> dict:
         "time": utcnow().isoformat() + "Z",
         "projection": {"facilities": len(list(live_store.all())), "subscribers": live_store.subscriber_count},
         "simulator": settings.simulator_enabled,
+        # The UI reads this to label synthetic figures as synthetic (#54). It is
+        # unauthenticated on purpose: a reader who is not signed in must still be
+        # able to tell a demonstration dataset from a live one.
+        "demo_mode": settings.demo_mode,
     }
 
 

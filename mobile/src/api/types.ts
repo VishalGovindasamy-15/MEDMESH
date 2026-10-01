@@ -122,6 +122,19 @@ export interface Facility {
   capacity: Capacity | null;
   trust: TrustVerdict | null;
   holds?: Record<string, number>;
+  /**
+   * Clinician cover right now. Counts and specialty names only — no clinician is
+   * identified on a listing. A facility that has opted out reports
+   * `withheld: true` with zeroes rather than omitting the field, so a caller can
+   * tell "nobody on duty" from "this was not sent".
+   */
+  doctors?: {
+    available: boolean;
+    on_duty: number;
+    accepting_emergency: number;
+    specialties: string[];
+    withheld: boolean;
+  };
 }
 
 export interface FacilityDetail extends Facility {
@@ -144,6 +157,11 @@ export interface FacilityDetail extends Facility {
     shift: string;
     accepts_emergency: boolean;
     duty_end: string | null;
+    /** Effective availability: the window has not elapsed. */
+    on_duty: boolean;
+    roster_flag: boolean;
+    duty_state: 'on_duty' | 'off_duty' | 'expired';
+    minutes_remaining: number | null;
   }[];
   /**
    * Inbound cases holding capacity at this facility. Staff-scoped: the API
@@ -178,11 +196,16 @@ export interface Doctor {
   department: string;
   designation: string;
   on_duty: boolean;
-  duty_state: string;
+  duty_state: 'on_duty' | 'off_duty' | 'expired';
   shift: string;
   shift_window: string;
   duty_end: string | null;
+  /** Signed: negative once the window has passed, so a caller can tell
+   *  "ends in 4 minutes" from "ended 4 minutes ago". */
   minutes_remaining: number | null;
+  /** The stored roster flag, before duty_end is taken into account. Only the
+   *  roster screen needs the difference; everything else uses `on_duty`. */
+  roster_flag?: boolean;
   accepts_emergency: boolean;
   languages: string[];
   hospital: {
@@ -284,7 +307,20 @@ export interface Incident {
     trapped: boolean;
     bystander_cpr: boolean;
   };
-  requires: { icu: boolean; ventilator: boolean; blood: boolean; specialty: string | null };
+  /**
+   * Resource requirements. `ambulance` is the capability preference order the
+   * engine will use to pick a unit, best first — the same list the manual picker
+   * ranks against, so choosing a crew by hand cannot disagree with the engine
+   * about what this call needs.
+   */
+  requires: {
+    icu: boolean;
+    ventilator: boolean;
+    blood: boolean;
+    specialty: string | null;
+    ambulance: string[];
+    ambulance_labels: string[];
+  };
   status: IncidentStatus;
   status_label: string;
   is_open: boolean;
@@ -694,6 +730,10 @@ export interface AdminUser {
   is_active: boolean;
   hospital: string | null;
   district: string | null;
+  vehicle: string | null;
+  hospital_id: number | null;
+  district_id: number | null;
+  ambulance_id: number | null;
   last_login_at: string | null;
   created_at: string;
 }

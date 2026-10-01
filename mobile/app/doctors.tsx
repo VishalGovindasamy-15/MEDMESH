@@ -7,6 +7,7 @@ import type { District, Doctor } from '../src/api/types';
 import { specialtyLabel } from '../src/lib/format';
 import { useLive } from '../src/state/LiveProvider';
 import { useTheme } from '../src/theme/ThemeProvider';
+import { DoctorPresence } from '../src/components/DutyPresence';
 import { space } from '../src/theme/tokens';
 import {
   Banner,
@@ -293,28 +294,19 @@ export default function DoctorsScreen() {
                 <Stack gap="sm">
                   {group.doctors.map((d) => (
                     <Row key={d.id} justify="space-between" align="center" gap="md">
-                      <Stack gap="xxs" style={{ flex: 1, minWidth: 0 }}>
-                        <Row gap="xs" align="center">
-                          <View
-                            style={{
-                              width: 6,
-                              height: 6,
-                              borderRadius: 3,
-                              backgroundColor: d.on_duty ? t.status.live.base : t.fg.faint,
-                            }}
-                          />
-                          <Body style={{ fontWeight: '600', fontSize: 13.5 }} numberOfLines={1}>
-                            {d.full_name}
-                          </Body>
-                        </Row>
-                        <Small muted style={{ fontSize: 11.5 }} numberOfLines={1}>
-                          {specialtyLabel(d.specialty)} · {d.designation}
-                        </Small>
-                      </Stack>
+                      {/* Name, speciality, then the presence statement in
+                          words. The green dot this replaces was the audit's
+                          example of the same defect on four screens at once:
+                          the smallest element on the card carried the answer
+                          the card exists to give. */}
+                      <DoctorPresence
+                        name={d.full_name}
+                        speciality={specialtyLabel(d.specialty)}
+                        designation={d.designation}
+                        doctor={d}
+                        right={undefined}
+                      />
                       <Stack gap="xxs" align="flex-end">
-                        <Num size={11.5} color={t.fg.muted}>
-                          {d.shift_window}
-                        </Num>
                         {d.accepts_emergency ? (
                           <Row gap="xxs" align="center">
                             <Icon name="pulse" size={10} color={t.status.live.base} />

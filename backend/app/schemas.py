@@ -443,12 +443,51 @@ class AmbulanceLocationUpdate(BaseModel):
 # --------------------------------------------------------------------------- #
 
 
+# Obvious personal identifiers, as patterns. Not a privacy engine — a gate:
+# the point is that a report carrying somebody's phone number or Aadhaar is
+# refused at the door rather than stored and discovered later (#47).
+_PII_PATTERNS = (
+    ("a phone number", re.compile(r"(?:\+?91[\s-]?)?[6-9]\d{9}\b")),
+    ("an email address", re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")),
+    ("a long digit run (Aadhaar, card or record number)", re.compile(r"\b\d{6,}\b")),
+    # The spaced form of the same thing: "2345 6789 0123" is an Aadhaar written
+    # the way people write it on paper.
+    ("a grouped digit run (Aadhaar or card number)", re.compile(r"\b(?:\d{4,5}[\s-]){2,}\d{4,5}\b")),
+    ("an age attached to a person", re.compile(r"\b(?:age|aged|yr[s]?\.? old)\b[\s:]*\d{1,3}", re.I)),
+    ("a named patient", re.compile(r"\b(?:patient|name(?:d)?|pt)\b[\s:]+[A-Z][a-z]+", re.I)),
+)
+
+
+def scan_for_pii(text: str) -> list[str]:
+    """Name the kinds of personal identifier a string appears to carry."""
+    return [label for label, rx in _PII_PATTERNS if rx.search(text)]
+
+
 class FeedbackCreate(BaseModel):
     hospital_id: int
     kind: Literal["beds_unavailable", "wrong_hours", "closed", "wrong_contact", "other"]
-    comment: str = Field(default="", max_length=400)
+    # Optional, short, and gated. The category is the report; the note is for
+    # the operational detail a category cannot carry ("ICU desk said the four
+    # free beds were taken at 06:00"). Anonymous submissions may not carry one
+    # at all, and any note that looks like it contains a personal identifier is
+    # refused rather than redacted — redaction that silently deletes words from
+    # a sentence produces a note nobody can trust.
+    comment: str = Field(default="", max_length=200)
     incident_id: int | None = None
     reporter_role: str = "citizen"
+
+    @field_validator("comment")
+    @classmethod
+    def _no_personal_detail(cls, value: str) -> str:
+        value = (value or "").strip()
+        hits = scan_for_pii(value)
+        if hits:
+            raise ValueError(
+                "The note appears to contain " + ", ".join(hits) +
+                ". Reports are checked against the facility's numbers, not against anybody's "
+                "identity — remove the personal detail and resubmit."
+            )
+        return value
 
 
 class FeedbackResolve(BaseModel):

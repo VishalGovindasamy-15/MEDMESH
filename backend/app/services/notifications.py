@@ -33,6 +33,34 @@ RETENTION_DAYS = 30
 log = logging.getLogger("medmesh.notifications")
 
 
+def _announce(row: Notification) -> None:
+    """Tell connected clients a notification exists.
+
+    Notifications were the one write in the platform that arrived silently: the
+    inbox learned about them on its next poll and the navigation badge had no way
+    to know at all. That is tolerable for a screen somebody is looking at and
+    wrong for a badge whose entire job is to be noticed.
+
+    `publish_soon` because every notify_* caller is synchronous; the event is
+    scheduled onto the loop that owns the sockets, and a caller with no loop
+    (the seeder, pytest) simply gets False.
+    """
+    from ..live import live_store
+
+    live_store.publish_soon(
+        "notification.created",
+        {
+            "notification_id": row.id,
+            "kind": row.kind.value if hasattr(row.kind, "value") else str(row.kind),
+            "severity": row.severity,
+            "hospital_id": row.hospital_id,
+            "user_id": row.user_id,
+            "incident_id": row.incident_id,
+            "title": row.title,
+        },
+    )
+
+
 def notify_facility(
     db: Session,
     *,
@@ -55,6 +83,7 @@ def notify_facility(
     )
     db.add(row)
     db.flush()
+    _announce(row)
     return row
 
 

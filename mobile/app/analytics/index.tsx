@@ -15,6 +15,7 @@ import {
   Body,
   Button,
   Card,
+  ConfirmDialog,
   Divider,
   EmptyState,
   Heading,
@@ -49,6 +50,7 @@ export default function AnalyticsScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const [surgeConfirm, setSurgeConfirm] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
 
   const load = useCallback(
@@ -87,7 +89,14 @@ export default function AnalyticsScreen() {
     return off;
   }, [subscribe, load]);
 
-  const toggleSurge = async () => {
+  /**
+   * Surge, behind a confirmation (#44).
+   *
+   * Activating surge relaxes the freshness windows every facility in the
+   * district is judged by, which changes trust scores platform-wide until it is
+   * stood down. That is not a button you want to discover you have pressed.
+   */
+  const runSurge = async () => {
     if (!overview) return;
     setBusy('surge');
     try {
@@ -182,7 +191,24 @@ export default function AnalyticsScreen() {
             size="sm"
             variant={overview.surge ? 'danger' : 'secondary'}
             loading={busy === 'surge'}
-            onPress={toggleSurge}
+            onPress={() => setSurgeConfirm(true)}
+          />
+          <ConfirmDialog
+            visible={surgeConfirm}
+            tone={overview.surge ? 'danger' : undefined}
+            title={overview.surge ? 'Stand down the district surge?' : 'Activate district surge?'}
+            body={
+              overview.surge
+                ? 'Freshness windows return to normal and facilities are judged on the usual clocks again from their next report.'
+                : 'Freshness windows relax for every facility in the district for the duration, and the surge banner shows on the district picture. Trust scoring follows the relaxed windows — this is a real change to how the district is judged, not a label.'
+            }
+            confirmLabel={overview.surge ? 'Stand down' : 'Activate surge'}
+            busy={busy === 'surge'}
+            onConfirm={() => {
+              setSurgeConfirm(false);
+              void runSurge();
+            }}
+            onCancel={() => setSurgeConfirm(false)}
           />
         </Row>
       }

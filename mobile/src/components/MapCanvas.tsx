@@ -3,7 +3,7 @@ import { Pressable, StyleSheet, View } from 'react-native';
 import Svg, { Circle, G, Line, Path, Rect, Text as SvgTextNode } from 'react-native-svg';
 
 import type { MapPoint } from './mapTypes';
-import { pinRadius, pinTone } from './mapTypes';
+import { freshnessOf, pinRadius, pinTone, RING_COLOUR } from './mapTypes';
 import { projectToCanvas, isWeb } from '../lib/format';
 import { useTheme } from '../theme/ThemeProvider';
 import { mono, space, type as typeScale } from '../theme/tokens';
@@ -292,7 +292,15 @@ export function MapCanvas({
           return (
             <G key={f.id}>
               {selected ? <Circle cx={p.x} cy={p.y} r={r + 7} fill={tone.ring} opacity={0.16} /> : null}
-              <Circle cx={p.x} cy={p.y} r={r} fill={tone.fill} stroke={tone.ring} strokeWidth={1.6} />
+              {/* Fill is capacity, outline is freshness -- see freshnessOf(). */}
+              <Circle
+                cx={p.x}
+                cy={p.y}
+                r={r}
+                fill={tone.fill}
+                stroke={RING_COLOUR[freshnessOf(f)]}
+                strokeWidth={1.6}
+              />
               {labelFor.has(f.id) ? (
                 <SvgTextNode
                   x={p.x}
@@ -389,7 +397,13 @@ export function MapCanvas({
           <Pressable
             key={`hit-${f.id}`}
             onPress={() => onSelect?.(f.id)}
-            accessibilityLabel={`${f.name ?? f.short_name}, ${pinTone(f).label}`}
+            accessibilityLabel={`${f.name ?? f.short_name}, ${pinTone(f).label}, ${
+              freshnessOf(f) === 'fresh'
+                ? 'reported recently'
+                : freshnessOf(f) === 'stale' || freshnessOf(f) === 'unknown'
+                  ? 'data stale or unreported'
+                  : 'data slightly out of date'
+            }`}
             style={{
               position: 'absolute',
               left: p.x - 18,
@@ -421,11 +435,22 @@ export function MapCanvas({
           backgroundColor: t.bg.surface,
         }}
       >
-        <Label style={{ fontSize: 9 }}>Capacity</Label>
+        {/* Two dimensions, kept apart.
+            The legend previously ran ICU free / Beds only / At capacity / No
+            data in one row, which conflates two different questions: how much
+            capacity is left (a property of the facility) and how recently anyone
+            confirmed it (a property of the report). A facility with 40 beds free
+            reported nine hours ago is not the same proposition as one with 40
+            beds free reported a minute ago, and a reader who cannot see the
+            second dimension will treat them as identical. */}
+        <Label style={{ fontSize: 9 }}>Fill</Label>
         <Legend color="#137547" label="ICU free" />
         <Legend color="#8a5a00" label="Beds only" />
         <Legend color="#a32217" label="At capacity" />
         <Legend color="transparent" ring="#8b93a1" label="No data" />
+        <Label style={{ fontSize: 9, marginLeft: 4 }}>Freshness</Label>
+        <Legend color="transparent" ring="#c3c8d1" label="Ring: reported now" />
+        <Legend color="transparent" ring="#8b93a1" label="Ring: stale or unknown" />
         <Small muted style={{ fontSize: 9.5, marginLeft: 'auto' }}>
           {labels.length < markers.length
             ? `${markers.length - labels.length} label(s) hidden to avoid overlap`

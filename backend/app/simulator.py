@@ -23,7 +23,7 @@ import logging
 import random
 from datetime import timedelta
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
 from .config import settings
@@ -89,6 +89,23 @@ async def ingest_loop() -> None:
 def _ingest_tick(tick: int) -> None:
     db = SessionLocal()
     try:
+        # The roster is synthetic for the same reason the capacity figures are,
+        # and needs the same upkeep: seeded duty windows carry an end time, and
+        # once expiry is enforced they all lapse. Renewal re-reads the shift each
+        # doctor was already given rather than inventing a schedule -- see
+        # services/roster.py. Cheap enough to attempt every tick; it is a single
+        # indexed read once nothing needs renewing.
+        try:
+            from .services.roster import renew_demo_roster
+
+            renewed = renew_demo_roster(db)
+            if renewed:
+                db.commit()
+                if tick % 10 == 1:
+                    log.info("roster renewed for %d clinician(s) on the current shift", renewed)
+        except Exception:
+            db.rollback()
+            log.exception("roster renewal failed")
         hospitals = list(db.execute(select(Hospital)).scalars().all())
         if not hospitals:
             return
@@ -149,16 +166,98 @@ def _ingest_tick(tick: int) -> None:
 
 
 async def workflow_loop() -> None:
-    """Advance open incidents and expire stale holds."""
+    """Advance open incidents, commit the ones nobody has picked up, expire holds."""
     await asyncio.sleep(6.0)
     while True:
         try:
             await asyncio.sleep(12.0)
             await asyncio.to_thread(_workflow_tick)
+            await _control_room_tick()
         except asyncio.CancelledError:
             raise
         except Exception:  # pragma: no cover
             log.exception("workflow tick failed")
+
+
+async def _control_room_tick() -> None:
+    """Play the operator, using the operator's own commit path.
+
+    `_demo_intake` keeps cases arriving. Nothing else in the pilot does what a
+    control room does with them, so an unattended build accumulates a queue of
+    open cases, no crew is ever sent, and the fleet map, the ward's inbound panel
+    and the driver app -- three of the five surfaces -- have nothing to show.
+
+    This calls the real `dispatch` endpoint handler, with a real dispatcher
+    account and the engine's own recommendation, so a case committed here carries
+    the same audit entry, bed hold, notification and socket events as one an
+    operator committed by hand. It is not a shortcut around the workflow; it is
+    the workflow, driven by a script instead of a person.
+
+    Simulator-only by construction: this runs from `workflow_loop`, which is
+    started only when the simulator is enabled.
+    """
+    from .models import UserRole
+    from .routers.dispatch import build_shortlist, dispatch as dispatch_endpoint
+    from .schemas import DispatchRequest
+
+    try:
+        with SessionLocal() as scout:
+            operator = scout.execute(
+                select(User).where(User.role == UserRole.DISPATCHER).order_by(User.id)
+            ).scalars().first()
+            if operator is None:
+                return
+
+            # One commit per tick at most, and only when the board is quiet: two
+            # crews landing on the same facility in the same tick is the sort of
+            # thing that makes a demo look scripted.
+            if _rng.random() > 0.35:
+                return
+
+            candidate = scout.execute(
+                select(Incident)
+                .where(Incident.status == IncidentStatus.OPEN)
+                .order_by(Incident.urgency, Incident.created_at)
+                .limit(1)
+            ).scalars().first()
+            if candidate is None:
+                return
+
+            shortlist = build_shortlist(scout, incident=candidate, limit=8)
+            best = next((c for c in shortlist if c["eligible"]), None)
+            if best is None:
+                # Nothing can take this case right now. Leaving it on the board
+                # is the correct behaviour, and the operator can see why.
+                return
+
+            incident_id = candidate.id
+            reference = candidate.reference
+            department = "icu" if candidate.requires_icu else (
+                "ventilator" if candidate.requires_ventilator else "bed"
+            )
+
+        # The endpoint opens its own unit of work from the request scope, so it
+        # gets one here too -- the read above is finished and closed.
+        with SessionLocal() as work:
+            await dispatch_endpoint(
+                incident_id,
+                DispatchRequest(hospital_id=best["hospital_id"], hold_resource=department),
+                operator,
+                work,
+            )
+        # Shortlist rows are keyed `name`/`short_name`; there is no
+        # `hospital_name`. This line used to raise a KeyError on every tick,
+        # which the blanket except below swallowed -- so the commit happened
+        # and the one line of log that would have told an operator about it
+        # never appeared.
+        log.info(
+            "demo control room: %s committed to %s (%s hold)",
+            reference,
+            best.get("short_name") or best.get("name") or best["hospital_id"],
+            department,
+        )
+    except Exception:  # pragma: no cover - a demo must never crash the loop
+        log.exception("control-room tick failed")
 
 
 def _workflow_tick() -> None:
@@ -176,6 +275,15 @@ def _workflow_tick() -> None:
             db.commit()
             for hospital_id in {h.hospital_id for h in expired}:
                 sync_hold_projection(db, hospital_id)
+
+        # --- demo intake -----------------------------------------------------
+        # Before advancing anything, make sure there is something to advance: the
+        # longitudinal demo empties out once every seeded case has been handed
+        # over, and an empty board demonstrates the empty states instead of the
+        # workflows. See DEMO_TARGET_OPEN.
+        created = _demo_intake(db)
+        if created:
+            db.commit()
 
         # --- incidents ------------------------------------------------------
         incidents = list(
@@ -651,3 +759,170 @@ async def start_background_loops() -> list[asyncio.Task]:
     tasks = [asyncio.create_task(ingest_loop(), name="ingest"), asyncio.create_task(workflow_loop(), name="workflow")]
     log.info("background loops started (ingest, workflow)")
     return tasks
+
+
+# --------------------------------------------------------------------------- #
+# Demo intake
+#
+# The pilot's incidents are synthetic, and the workflow loop above advances each
+# one to handover and stops. After a couple of hours every case in the dataset is
+# closed, so the console opens on "No incidents in this view", the crew app shows
+# a standing driver, and the ward has no inbound panel -- the three screens the
+# pilot exists to demonstrate, all showing their empty state.
+#
+# This keeps a small number of cases live. It is deliberately modest: an intake of
+# two to four concurrent cases at a time is what a single control room handles,
+# and a board with sixty open incidents would misrepresent the load the dashboard
+# is designed to show.
+#
+# Only runs in the simulator, never against real facilities, and every case it
+# creates is indistinguishable from one an operator raised -- same reference
+# scheme, same district, same structured assessment -- because a demo record with
+# a "DEMO" marker behaves differently from a real one everywhere it matters.
+# --------------------------------------------------------------------------- #
+
+#: How many cases to keep open. Below this, one is created per workflow tick.
+DEMO_TARGET_OPEN = 3
+
+#: Probability of creating one per tick, so the board does not fill instantly.
+DEMO_INTAKE_CHANCE = 0.55
+
+#: Landmarks worth dispatching to, by category, with the district code they sit
+#: in. Real places, because the map draws them and a crew reads them out.
+DEMO_SCENES: list[tuple] = [
+    ("road_accident", "P1", "Avakatti bypass, NH-948", "COI"),
+    ("cardiac", "P1", "Mettupalayam Road, near Thudiyalur", "COI"),
+    ("snakebite", "P2", "Kallar farming settlement", "COI"),
+    ("obstetric", "P1", "Annur primary health centre", "COI"),
+    ("road_accident", "P1", "Salem-Coimbatore highway, Sankari", "SLM"),
+    ("stroke", "P1", "Thillai Nagar 4th cross", "TRY"),
+    ("paediatric", "P2", "Bhavani bus stand", "ERD"),
+    ("burns", "P1", "Sivakasi match factory unit 3", "VRN"),
+    ("poisoning", "P2", "Kumbakonam market street", "TJV"),
+    ("trauma_fall", "P2", "Yercaud ghat road, hairpin 12", "SLM"),
+    ("respiratory", "P2", "Thoothukudi harbour road", "TUT"),
+    ("road_accident", "P1", "Madurai ring road, Thirunagar", "MDU"),
+]
+
+
+def _demo_intake(db) -> int:
+    """Raise a new case if the board is running thin. Returns 1 if created."""
+    from .models import LocationSource
+    from .services import triage
+
+    live = db.execute(
+        select(func.count())
+        .select_from(Incident)
+        .where(Incident.status.in_(tuple(lifecycle.ACTIVE_TRIP_STATES) + (IncidentStatus.OPEN,)))
+    ).scalar_one()
+    if live >= DEMO_TARGET_OPEN or _rng.random() > DEMO_INTAKE_CHANCE:
+        return 0
+
+    category, urgency, landmark, code = _rng.choice(DEMO_SCENES)
+    district = db.execute(select(District).where(District.code == code)).scalar_one_or_none()
+    if district is None:
+        district = db.execute(select(District).order_by(District.id)).scalars().first()
+    if district is None:
+        return 0
+
+    scene = _demo_scene(category)
+    # Same derivation the console runs on a live call, so a demo case carries the
+    # ICU/ventilator/blood requirement its assessment implies rather than a flag
+    # somebody set by hand.
+    needs = triage.derive(
+        category=IncidentCategory(category),
+        patient_state=scene["patient_state"],
+        mechanism=scene["mechanism"],
+        bleeding=scene["bleeding"],
+        hazard=scene["hazard"],
+        observations=scene["observations"],
+        trapped=scene["trapped"],
+        bystander_cpr=scene["bystander_cpr"],
+        casualty_count=scene["casualty_count"],
+    )
+
+    incident = Incident(
+        reference=references.allocate_reference(db),
+        category=IncidentCategory(category),
+        urgency=Urgency(urgency),
+        lat=round(district.lat + _rng.uniform(-0.06, 0.06), 5),
+        lng=round(district.lng + _rng.uniform(-0.06, 0.06), 5),
+        landmark=landmark,
+        district_id=district.id,
+        taluk=district.name,
+        location_source=LocationSource.MAP,
+        patient_state=scene["patient_state"],
+        mechanism=scene["mechanism"],
+        bleeding=scene["bleeding"],
+        hazard=scene["hazard"],
+        casualty_count=scene["casualty_count"],
+        trapped=scene["trapped"],
+        bystander_cpr=scene["bystander_cpr"],
+        observations=",".join(str(o) for o in scene["observations"]),
+        required_specialty=needs.specialty,
+        requires_icu=needs.requires_icu,
+        requires_ventilator=needs.requires_ventilator,
+        requires_blood=needs.requires_blood,
+        status=IncidentStatus.OPEN,
+        created_by=1,
+        created_at=utcnow(),
+    )
+    db.add(incident)
+    db.flush()
+    return 1
+
+
+#: Structured assessment per category. Non-identifying fields only, matching what
+#: the console's composer collects -- the demo must not be able to record anything
+#: an operator could not.
+_DEMO_ASSESSMENT: dict[str, dict] = {
+    "road_accident": dict(
+        patient_state=PatientState.DROWSY, mechanism=Mechanism.TWO_WHEELER, bleeding=Bleeding.MINOR,
+        hazard=Hazard.TRAFFIC_ACTIVE, observations=[ObservationFlag.SUSPECTED_FRACTURE, ObservationFlag.LIMB_DEFORMITY],
+    ),
+    "cardiac": dict(
+        patient_state=PatientState.ALERT, mechanism=Mechanism.NONE, bleeding=Bleeding.NONE,
+        hazard=Hazard.NONE, observations=[ObservationFlag.CHEST_PAIN, ObservationFlag.BREATHLESSNESS],
+    ),
+    "snakebite": dict(
+        patient_state=PatientState.ALERT, mechanism=Mechanism.OTHER, bleeding=Bleeding.NONE,
+        hazard=Hazard.NONE, observations=[ObservationFlag.SNAKEBITE_SWELLING],
+    ),
+    "obstetric": dict(
+        patient_state=PatientState.ALERT, mechanism=Mechanism.NONE, bleeding=Bleeding.SEVERE,
+        hazard=Hazard.NONE, observations=[ObservationFlag.OBSTETRIC_LABOUR, ObservationFlag.POSTPARTUM_BLEEDING],
+    ),
+    "stroke": dict(
+        patient_state=PatientState.ALERT, mechanism=Mechanism.NONE, bleeding=Bleeding.NONE,
+        hazard=Hazard.NONE, observations=[ObservationFlag.PARALYSIS_ONE_SIDE, ObservationFlag.SLURRED_SPEECH],
+    ),
+    "paediatric": dict(
+        patient_state=PatientState.DROWSY, mechanism=Mechanism.NONE, bleeding=Bleeding.NONE,
+        hazard=Hazard.NONE, observations=[ObservationFlag.FEVER, ObservationFlag.VOMITING],
+    ),
+    "burns": dict(
+        patient_state=PatientState.ALERT, mechanism=Mechanism.OTHER, bleeding=Bleeding.NONE,
+        hazard=Hazard.FIRE, observations=[ObservationFlag.BURNS_SURFACE, ObservationFlag.INHALATION_SMOKE],
+    ),
+    "poisoning": dict(
+        patient_state=PatientState.DROWSY, mechanism=Mechanism.OTHER, bleeding=Bleeding.NONE,
+        hazard=Hazard.CHEMICAL, observations=[ObservationFlag.POISON_INGESTED, ObservationFlag.VOMITING],
+    ),
+    "trauma_fall": dict(
+        patient_state=PatientState.ALERT, mechanism=Mechanism.FALL_HEIGHT, bleeding=Bleeding.MINOR,
+        hazard=Hazard.NONE, observations=[ObservationFlag.SUSPECTED_FRACTURE],
+    ),
+    "respiratory": dict(
+        patient_state=PatientState.ALERT, mechanism=Mechanism.NONE, bleeding=Bleeding.NONE,
+        hazard=Hazard.NONE, observations=[ObservationFlag.BREATHLESSNESS],
+    ),
+}
+
+
+def _demo_scene(category: str) -> dict:
+    """Assessment for a category, with the fields every Incident needs filled."""
+    scene = dict(_DEMO_ASSESSMENT.get(category, _DEMO_ASSESSMENT["respiratory"]))
+    scene.setdefault("casualty_count", 1)
+    scene.setdefault("trapped", False)
+    scene.setdefault("bystander_cpr", False)
+    return scene

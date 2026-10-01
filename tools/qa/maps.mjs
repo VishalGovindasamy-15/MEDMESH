@@ -34,8 +34,20 @@ const STUB = `
     log.options = opts || {};
     this.el = el;
     this.panTo = function (p) { log.panned = p; };
-    this.setCenter = function () {};
-    this.setZoom = function () {};
+    this.setCenter = function (p) { log.centered = p; };
+    this.setZoom = function (z) { log.zoom = z; };
+    // The clustering and auto-fit code paths ask the map for its camera. The
+    // stub answers like a freshly-constructed real map: a zoom, no projection
+    // yet (the app falls back to its own equirectangular spread), and a
+    // fitBounds that records what it was asked to frame.
+    this.getZoom = function () { return 7; };
+    this.getProjection = function () { return null; };
+    this.fitBounds = function (b, pad) { log.fitBounds = (log.fitBounds ?? 0) + 1; };
+    this.addListener = function (ev, fn) { return { remove: function () {} }; };
+  }
+  function LatLng(lat, lng) { this.lat = function () { return lat; }; this.lng = function () { return lng; }; }
+  function LatLngBounds() {
+    this.extend = function () { return this; };
   }
   function Marker(opts) {
     log.markers.push({
@@ -58,6 +70,11 @@ const STUB = `
       Marker: Marker,
       Polyline: Polyline,
       SymbolPath: { CIRCLE: 0, FORWARD_CLOSED_ARROW: 1 },
+      LatLng: LatLng,
+      LatLngBounds: LatLngBounds,
+      event: {
+        addListenerOnce: function (target, ev, fn) { return { remove: function () {} }; },
+      },
     },
   };
   if (typeof window.__medmeshMapsReady === 'function') window.__medmeshMapsReady();
@@ -186,6 +203,16 @@ const browser = await chromium.launch();
     log ? [...new Set(log.markers.map((m) => m.fill))].join(' ') : '',
   );
   check('maps: legend says Google Maps', /Basemap · Google Maps/.test(legend));
+  check(
+    'maps: camera fitted to the visible facilities (#48)',
+    !!log && (log.fitBounds ?? 0) > 0 || !!log && log.centered,
+    log ? `fitBounds=${log.fitBounds ?? 0} centred=${!!log.centered}` : '',
+  );
+  check(
+    'maps: pins cluster once the list is long (#49)',
+    !!log && log.markers.length > 0 && log.markers.length < 152,
+    log ? `${log.markers.length} markers for 152 facilities` : '',
+  );
   check('maps: no console errors', errors.length === 0, errors.slice(0, 2).join(' | '));
 
   await page.screenshot({ path: '/home/user/medmesh/docs/shots/31-maps-desktop.png' });

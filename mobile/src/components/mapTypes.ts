@@ -31,6 +31,14 @@ export interface MapPoint {
    * a candidate's clinical importance is not a function of its bed count anyway.
    */
   declared_beds?: number;
+  /**
+   * Lets a caller that is not drawing facilities — the fleet board draws
+   * vehicles — supply its own colour vocabulary without forking the canvas.
+   * Absent means "derive from capacity", which is what the directory wants.
+   */
+  pin_override?: PinTone | null;
+  /** Same idea for the freshness ring: a vehicle's freshness is its GPS age. */
+  freshness_override?: FreshnessRing | null;
 }
 
 /** Adapt full facility records — the directory and the facility page. */
@@ -66,6 +74,7 @@ export interface PinTone {
  * trouble, we simply do not know, and those are different messages.
  */
 export function pinTone(point: MapPoint): PinTone {
+  if (point.pin_override) return point.pin_override;
   const cap = point.capacity;
   const stale = !cap || ['stale', 'cold', 'unknown'].includes(cap.trust_state ?? 'unknown');
   if (stale) return { fill: 'transparent', ring: '#8b93a1', label: 'No recent data' };
@@ -83,3 +92,33 @@ export function pinFill(point: MapPoint): string {
 export function pinOpacity(point: MapPoint): number {
   return pinTone(point).fill === 'transparent' ? 0.45 : 1;
 }
+
+/**
+ * The second dimension: how recently anybody confirmed the number.
+ *
+ * Fill answers "is there capacity here". Ring answers "do we believe it". The
+ * two are independent -- a facility with forty beds free reported nine hours ago
+ * and one reported a minute ago are the same colour and completely different
+ * propositions -- and the map previously showed only the first, with the
+ * freshness buried in the trust band of a facility list the reader may never
+ * open. Rendering it as the pin's outline keeps both readable at a glance and
+ * works in the schematic canvas and on tiles alike.
+ */
+export type FreshnessRing = 'fresh' | 'warming' | 'stale' | 'unknown';
+
+export function freshnessOf(point: MapPoint): FreshnessRing {
+  if (point.freshness_override) return point.freshness_override;
+  const state = point.capacity?.trust_state;
+  if (!state || state === 'unknown' || state === 'cold') return 'unknown';
+  if (state === 'live') return 'fresh';
+  if (state === 'warm') return 'warming';
+  return 'stale';
+}
+
+/** Ring colour for a freshness band. Deliberately desaturated: fill leads. */
+export const RING_COLOUR: Record<FreshnessRing, string> = {
+  fresh: '#ffffff',
+  warming: '#8a5a00',
+  stale: '#8b93a1',
+  unknown: '#c3c8d1',
+};

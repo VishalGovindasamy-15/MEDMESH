@@ -1,12 +1,13 @@
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Linking, RefreshControl, ScrollView, StyleSheet, View } from 'react-native';
+import { Linking, Pressable, RefreshControl, ScrollView, StyleSheet, View } from 'react-native';
 
 import { api, ApiError } from '../../src/api/client';
-import type { Incident, RoutingSummary, ShortlistCandidate } from '../../src/api/types';
+import type { Ambulance, Incident, RoutingSummary, ShortlistCandidate } from '../../src/api/types';
 import { MapSurface } from '../../src/components/MapSurface';
 import type { MapPoint } from '../../src/components/mapTypes';
-import { ageFromSeconds, categoryLabel, clockTime, countdown, elapsed, STATUS_LABELS } from '../../src/lib/format';
+import { ageFromSeconds, categoryLabel, clockTime, countdown, elapsed, relativeFromIso, STATUS_LABELS } from '../../src/lib/format';
+import { straightKm, straightMinutes } from '../../src/lib/geo';
 import { navigationUrl } from '../../src/lib/maps';
 import { useAuth } from '../../src/state/AuthProvider';
 import { useLive } from '../../src/state/LiveProvider';
@@ -17,6 +18,7 @@ import {
   Body,
   Button,
   Card,
+  ConfirmDialog,
   Divider,
   EmptyState,
   Heading,
@@ -70,21 +72,42 @@ export default function IncidentWorkspace() {
   const [showRejected, setShowRejected] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [tick, setTick] = useState(0);
+  // Crew selection. Null means "the engine picks", which stays the default:
+  // the capability-aware assignment is better at this than a person reading a
+  // list under time pressure, and an operator who wants a specific unit is
+  // usually overriding for a reason the engine cannot see (a crew already at
+  // the scene, a unit the caller's family asked for).
+  const [crew, setCrew] = useState<{ available: number; results: Ambulance[] } | null>(null);
+  const [crewChoice, setCrewChoice] = useState<number | null>(null);
+  const [crewPick, setCrewPick] = useState(false);
+  // The dispatch confirmation and the override justification are separate
+  // steps because they answer different questions, and collapsing them is how
+  // "are you sure?" dialogs become something people dismiss without reading.
+  const [pending, setPending] = useState<
+    { kind: 'commit' | 'override'; candidate: ShortlistCandidate; reason?: string; blockers?: string[] } | null
+  >(null);
+  const [crewProblem, setCrewProblem] = useState<string | null>(null);
 
   const load = useCallback(
     async (silent = false) => {
       if (!silent) setRefreshing(true);
       try {
-        const [inc, list] = await Promise.all([
+        const [inc, list, fleet] = await Promise.all([
           api.get<Incident>(`/incidents/${incidentId}`, { token }),
           api.get<{ results: ShortlistCandidate[]; routing?: RoutingSummary }>(
             `/incidents/${incidentId}/shortlist?limit=12`,
             { token },
           ),
+          // The units this operator may commit. Fetched with the shortlist so
+          // the crew panel is populated on the same render as the facilities --
+          // an operator who has to open a picker that then loads has lost the
+          // thread of the call.
+          api.get<{ results: Ambulance[]; available: number }>(`/ambulances`, { token }),
         ]);
         setIncident(inc);
         setShortlist(list.results);
         setRouting(list.routing ?? null);
+        setCrew({ available: fleet.available, results: fleet.results });
         setSelected((prev) => prev ?? list.results.find((c) => c.eligible)?.hospital_id ?? null);
         setError(null);
       } catch (err) {
@@ -124,6 +147,49 @@ export default function IncidentWorkspace() {
   const chosen = useMemo(() => shortlist.find((c) => c.hospital_id === selected) ?? null, [shortlist, selected]);
 
   /**
+   * Units worth showing this operator, best first.
+   *
+   * Ordered by the same preference the dispatch engine walks: a unit carrying a
+   * capability this incident asks for comes before one that does not, a crewed
+   * unit before an empty vehicle, and distance from the scene last. The list is
+   * advisory -- the server re-validates whatever is committed and returns its
+   * blockers, which is where the authoritative answer lives.
+   */
+  const crewOptions = useMemo(() => {
+    const wanted: string[] = incident?.requires.ambulance ?? [];
+    const scene = { lat: incident?.lat ?? 0, lng: incident?.lng ?? 0 };
+    return (crew?.results ?? [])
+      .map((unit) => {
+        const caps = unit.capabilities?.length ? unit.capabilities : [unit.capability];
+        const wantedIndex = wanted.findIndex((w) => caps.includes(w));
+        return {
+          unit,
+          caps,
+          wants: wantedIndex === 0,
+          capability_rank: wantedIndex === -1 ? wanted.length : wantedIndex,
+          km: straightKm({ lat: unit.lat, lng: unit.lng }, scene),
+          crewed: unit.driver_user_id != null,
+          free: unit.status === 'available',
+        };
+      })
+      .sort(
+        (a, b) =>
+          a.capability_rank - b.capability_rank ||
+          Number(b.free) - Number(a.free) ||
+          Number(b.crewed) - Number(a.crewed) ||
+          a.km - b.km,
+      );
+  }, [crew, incident]);
+
+  const crewUnit = useMemo(
+    () => crewOptions.find((o) => o.unit.id === crewChoice) ?? null,
+    [crewOptions, crewChoice],
+  );
+
+  const crewFree = crewOptions.filter((o) => o.free).length;
+  const crewCommitted = (crew?.results.length ?? 0) - crewFree;
+
+  /**
    * The shortlist rendered as map markers.
    *
    * The console's map has to answer one question — "which of these can I still
@@ -151,25 +217,54 @@ export default function IncidentWorkspace() {
   const dispatchTo = async (candidate: ShortlistCandidate, overrideReason?: string) => {
     setBusy('dispatch');
     setBlocked(null);
+    setCrewProblem(null);
     try {
       await api.post(
         `/incidents/${incidentId}/dispatch`,
         {
           hospital_id: candidate.hospital_id,
+          // The crew choice belongs to the commit. A re-route moves the
+          // destination only; the server refuses a crew id here rather than
+          // pretending to re-crew a moving vehicle.
+          ambulance_id: isDispatched ? undefined : crewChoice,
           hold_resource: holdResource === 'none' ? null : holdResource,
           hold_seconds: 900,
           override_reason: overrideReason ?? null,
         },
         { token },
       );
+      setPending(null);
+      setCrewPick(false);
       await load(true);
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
         const detail: any = err.detail;
         if (detail && typeof detail === 'object' && Array.isArray(detail.blockers) && detail.blockers.length) {
+          // Either the facility or the chosen unit. Both are overridable, and
+          // both now require a typed reason rather than a tap.
+          setPending({ kind: 'override', candidate, blockers: detail.blockers });
           setBlocked({ candidate, blockers: detail.blockers });
           setShowRejected(true);
+        } else if (detail && typeof detail === 'object' && detail.override) {
+          // A re-route onto a facility that already declined this patient: the
+          // server refuses with a message and an override instruction but no
+          // blockers array. Same contract, same dialog — a refusal that names
+          // an override path has to lead to it, not to an error banner.
+          const blockers = [detail.message ?? 'This facility has already declined'];
+          setPending({ kind: 'override', candidate, blockers });
+          setBlocked({ candidate, blockers });
+          setShowRejected(true);
+        } else if (typeof detail === 'string' && /ambulance/i.test(detail)) {
+          // #31: the old code printed the engine's line verbatim and left it on
+          // screen, so an operator who had just released a unit still read "no
+          // ambulance available". The fleet is re-read and the message is
+          // rebuilt from it, with the picker opened beside it.
+          setCrewProblem(detail);
+          setCrewPick(true);
+          setPending(null);
+          await load(true);
         } else {
+          setPending(null);
           setError(err.message);
         }
       } else {
@@ -193,6 +288,26 @@ export default function IncidentWorkspace() {
       setError(err instanceof ApiError ? err.message : 'Re-route failed');
     } finally {
       setBusy(null);
+    }
+  };
+
+  /**
+   * Commit after the operator has confirmed.
+   *
+   * One handler for both paths: an ordinary commit and an override are the same
+   * call with different justifications, and the only difference here is whether
+   * the reason the dialog collected travels with it. An override with no reason
+   * cannot arrive -- the dialog will not confirm without one -- so the server's
+   * audit entry can never be the bare word "override".
+   */
+  const confirmPending = async (reason?: string) => {
+    if (!pending) return;
+    const candidate = pending.candidate;
+    setPending(null);
+    if (isDispatched) {
+      await reroute(candidate);
+    } else {
+      await dispatchTo(candidate, reason);
     }
   };
 
@@ -595,6 +710,226 @@ export default function IncidentWorkspace() {
                     </Small>
                   </Stack>
 
+                  {/* Crew --------------------------------------------------
+                      The engine is the default and the recommendation, but the
+                      operator is the one on the phone: a crew already at the
+                      scene, a unit the family knows, a vehicle the control room
+                      wants held back. Choosing a unit by hand is a supported
+                      decision rather than a hidden one, so it is a first-class
+                      panel with the unit's capability, crew and position shown
+                      before anything is committed. */}
+                  <Stack gap="xs">
+                    <Row justify="space-between" align="center" gap="sm">
+                      <Label>Crew</Label>
+                      <Small muted style={{ fontSize: 11 }}>
+                        {crewFree} free of {crew?.results.length ?? 0}
+                      </Small>
+                    </Row>
+
+                    {crewUnit ? (
+                      <Row gap="sm" align="center">
+                        <Icon name="ambulance" size={14} color={t.accent.base} />
+                        <Body style={{ fontWeight: '600', fontSize: 13 }}>{crewUnit.unit.call_sign}</Body>
+                        <Pill label={crewUnit.unit.capability_label} tone="info" compact />
+                      </Row>
+                    ) : (
+                      <Row gap="sm" align="center">
+                        <Icon name="route" size={14} color={t.fg.muted} />
+                        <Body muted style={{ fontSize: 13 }}>
+                          Engine picks the nearest capable unit
+                        </Body>
+                      </Row>
+                    )}
+
+                    {incident.requires.ambulance_labels?.length ? (
+                      <Small muted style={{ fontSize: 11 }}>
+                        This call wants {incident.requires.ambulance_labels[0].toLowerCase()}
+                        {incident.requires.ambulance_labels.length > 1
+                          ? `, then ${incident.requires.ambulance_labels.slice(1).join(' or ').toLowerCase()}`
+                          : ''}
+                        .
+                      </Small>
+                    ) : null}
+
+                    {/* The preview. #30: the operator saw a call sign in a menu
+                        and committed a vehicle sight unseen -- no capability, no
+                        crew, no idea whether the position the ETA was measured
+                        from was thirty seconds or forty minutes old. */}
+                    {crewUnit ? (
+                      <View
+                        style={{
+                          borderWidth: StyleSheet.hairlineWidth,
+                          borderColor: t.line.base,
+                          borderRadius: radius.md,
+                          backgroundColor: t.bg.sunken,
+                          padding: space.sm,
+                          gap: 4,
+                        }}
+                      >
+                        <Row justify="space-between" gap="sm">
+                          <Small muted style={{ fontSize: 11 }}>Registration</Small>
+                          <Num size={11.5}>{crewUnit.unit.registration}</Num>
+                        </Row>
+                        <Row justify="space-between" gap="sm">
+                          <Small muted style={{ fontSize: 11 }}>Operator</Small>
+                          <Small style={{ fontSize: 11.5 }} numberOfLines={1}>
+                            {crewUnit.unit.operator_name}
+                          </Small>
+                        </Row>
+                        <Row justify="space-between" gap="sm">
+                          <Small muted style={{ fontSize: 11 }}>Capability</Small>
+                          <Small style={{ fontSize: 11.5 }} numberOfLines={1}>
+                            {(crewUnit.unit.capability_labels?.length
+                              ? crewUnit.unit.capability_labels
+                              : [crewUnit.unit.capability_label]
+                            ).join(' · ')}
+                            {crewUnit.wants ? ' — matches this call' : ' — not what this call asks for'}
+                          </Small>
+                        </Row>
+                        <Row justify="space-between" gap="sm">
+                          <Small muted style={{ fontSize: 11 }}>Crew</Small>
+                          <Small style={{ fontSize: 11.5 }} numberOfLines={1}>
+                            {crewUnit.unit.driver?.full_name ?? 'No crew account linked'}
+                          </Small>
+                        </Row>
+                        <Row justify="space-between" gap="sm">
+                          <Small muted style={{ fontSize: 11 }}>Status</Small>
+                          <Small
+                            style={{
+                              fontSize: 11.5,
+                              color: crewUnit.free ? t.status.live.base : t.status.warm.base,
+                            }}
+                          >
+                            {crewUnit.unit.status_label ?? crewUnit.unit.status}
+                          </Small>
+                        </Row>
+                        <Row justify="space-between" gap="sm">
+                          <Small muted style={{ fontSize: 11 }}>Position</Small>
+                          <Row gap="xs" align="center">
+                            <Num size={11.5}>
+                              {straightMinutes({ lat: crewUnit.unit.lat, lng: crewUnit.unit.lng }, { lat: incident.lat, lng: incident.lng })} min
+                            </Num>
+                            <Small muted style={{ fontSize: 11 }}>
+                              straight line · GPS fix {relativeFromIso(crewUnit.unit.updated_at)}
+                            </Small>
+                          </Row>
+                        </Row>
+                        <Small muted style={{ fontSize: 10.5 }}>
+                          The committed ETA is measured on the road network from this position and is
+                          shown once the unit is assigned.
+                        </Small>
+                      </View>
+                    ) : null}
+
+                    {crewProblem ? (
+                      <Banner
+                        tone="warm"
+                        icon="alert"
+                        title="No free unit right now"
+                        body={`${crewProblem} ${crewCommitted} unit${
+                          crewCommitted === 1 ? '' : 's'
+                        } in this scope ${
+                          crewCommitted === 1 ? 'is' : 'are'
+                        } already committed or out of service. Pick one below to require it anyway, or re-route the receiving facility.`}
+                      />
+                    ) : null}
+
+                    <Button
+                      label={crewPick ? 'Hide units' : `Choose a unit (${crewFree} free)`}
+                      icon={crewPick ? 'chevronUp' : 'chevronDown'}
+                      size="sm"
+                      onPress={() => setCrewPick((v) => !v)}
+                    />
+
+                    {crewPick ? (
+                      <Stack gap="xs">
+                        <Pressable
+                          onPress={() => setCrewChoice(null)}
+                          accessibilityRole="button"
+                          accessibilityState={{ selected: crewChoice === null }}
+                          accessibilityLabel="Let the dispatch engine choose the crew"
+                          style={{
+                            borderWidth: StyleSheet.hairlineWidth,
+                            borderColor: crewChoice === null ? t.accent.base : t.line.base,
+                            backgroundColor: crewChoice === null ? t.accent.wash : t.bg.surface,
+                            borderRadius: radius.md,
+                            paddingHorizontal: 10,
+                            paddingVertical: 8,
+                          }}
+                        >
+                          <Row justify="space-between" align="center" gap="sm">
+                            <Body style={{ fontSize: 12.5 }}>Let the engine choose</Body>
+                            {crewChoice === null ? <Icon name="check" size={13} color={t.accent.base} /> : null}
+                          </Row>
+                        </Pressable>
+
+                        {crewOptions.slice(0, 12).map((option) => {
+                          const isSelected = crewChoice === option.unit.id;
+                          return (
+                            <Pressable
+                              key={option.unit.id}
+                              onPress={() => setCrewChoice(option.unit.id)}
+                              accessibilityRole="button"
+                              accessibilityState={{ selected: isSelected }}
+                              accessibilityLabel={`${option.unit.call_sign}, ${option.unit.capability_label}, ${
+                                option.unit.status_label ?? option.unit.status
+                              }${option.wants ? ', matches this call' : ''}`}
+                              style={{
+                                borderWidth: StyleSheet.hairlineWidth,
+                                borderColor: isSelected ? t.accent.base : t.line.base,
+                                backgroundColor: isSelected ? t.accent.wash : t.bg.surface,
+                                borderRadius: radius.md,
+                                paddingHorizontal: 10,
+                                paddingVertical: 8,
+                                gap: 3,
+                                opacity: option.free ? 1 : 0.62,
+                              }}
+                            >
+                              <Row justify="space-between" align="center" gap="sm">
+                                <Row gap="xs" align="center">
+                                  <Num size={12.5}>{option.unit.call_sign}</Num>
+                                  {option.wants ? <Pill label="Capability match" tone="live" compact /> : null}
+                                </Row>
+                                <Num size={11.5} color={t.fg.muted}>
+                                  {option.km.toFixed(1)} km
+                                </Num>
+                              </Row>
+                              <Row justify="space-between" align="center" gap="sm">
+                                <Small muted style={{ fontSize: 11 }}>
+                                  {option.unit.capability_label}
+                                  {option.crewed
+                                    ? ` · ${option.unit.driver?.full_name ?? 'crew linked'}`
+                                    : ' · no crew linked'}
+                                </Small>
+                                <Small
+                                  style={{
+                                    fontSize: 11,
+                                    color: option.free ? t.status.live.base : t.status.warm.base,
+                                  }}
+                                >
+                                  {option.unit.status_label ?? option.unit.status}
+                                </Small>
+                              </Row>
+                            </Pressable>
+                          );
+                        })}
+                        {crewOptions.length > 12 ? (
+                          <Small muted style={{ fontSize: 11 }}>
+                            Showing the 12 nearest of {crewOptions.length}. The engine considers the whole
+                            fleet when you let it choose.
+                          </Small>
+                        ) : null}
+                      </Stack>
+                    ) : null}
+
+                    {crewChoice !== null && crewUnit && !crewUnit.free ? (
+                      <Small muted style={{ fontSize: 10.5 }}>
+                        {crewUnit.unit.call_sign} is not free. Committing it requires a reason and will be
+                        recorded against your account.
+                      </Small>
+                    ) : null}
+                  </Stack>
+
                   {chosen.trust?.factors?.length ? (
                     <Stack gap="xs">
                       <Label>Why this facility scores {chosen.trust.score}</Label>
@@ -618,7 +953,7 @@ export default function IncidentWorkspace() {
                     full
                     loading={busy === 'dispatch' || busy === 'reroute'}
                     disabled={isFinished}
-                    onPress={() => (isDispatched ? reroute(chosen) : dispatchTo(chosen))}
+                    onPress={() => setPending({ kind: 'commit', candidate: chosen })}
                   />
 
                   {blocked && blocked.candidate.hospital_id === chosen.hospital_id ? (
@@ -628,14 +963,15 @@ export default function IncidentWorkspace() {
                       size="sm"
                       full
                       onPress={() =>
-                        dispatchTo(chosen, `operator override: ${blocked.blockers.join('; ')}`)
+                        setPending({ kind: 'override', candidate: chosen, blockers: blocked.blockers })
                       }
                     />
                   ) : null}
 
                   <Small muted style={{ fontSize: 11 }}>
-                    Dispatch notifies the crew and sends the receiving facility a preparation alert with the ETA,
-                    category and requirements. Both are written to the audit trail against your account.
+                    Committing sends the crew the assignment and the receiving facility a preparation alert
+                    with the ETA, category and requirements. Both are written to the audit trail against your
+                    account.
                   </Small>
                 </>
               ) : (
@@ -677,6 +1013,76 @@ export default function IncidentWorkspace() {
           </Stack>
         </Row>
       </ScrollView>
+
+      {/* The confirmation step. Deliberately not a one-tap action: this panel
+          sits beside the facility rows and the status controls, and the cost of
+          committing the wrong unit to the wrong patient is measured in minutes
+          of somebody else's ambulance. */}
+      <ConfirmDialog
+        visible={pending?.kind === 'commit'}
+        title={
+          pending?.candidate
+            ? isDispatched
+              ? `Re-route ${incident.reference}?`
+              : `Commit ${incident.reference}?`
+            : 'Confirm'
+        }
+        body={
+          pending?.candidate ? (
+            <Stack gap="xs">
+              <KeyValue label="Facility">{pending.candidate.short_name}</KeyValue>
+              <KeyValue label="Drive time">
+                {`${pending.candidate.eta_minutes} min · ${pending.candidate.distance_label}`}
+              </KeyValue>
+              <KeyValue label="Crew">
+                {crewUnit ? `${crewUnit.unit.call_sign} (chosen)` : 'Engine will assign the nearest capable unit'}
+              </KeyValue>
+              <KeyValue label="Reserving">
+                {holdResource === 'none' ? 'No hold' : `${holdResource} for 15 minutes`}
+              </KeyValue>
+              <Small muted style={{ fontSize: 11 }}>
+                {isDispatched
+                  ? 'The crew and the previous facility are both notified. Any hold at the previous facility is released before the new one is placed.'
+                  : 'The crew is assigned and the receiving facility is alerted with the ETA, category and requirements.'}
+              </Small>
+            </Stack>
+          ) : null
+        }
+        confirmLabel={isDispatched ? 'Re-route' : 'Dispatch'}
+        busy={busy === 'dispatch' || busy === 'reroute'}
+        onConfirm={confirmPending}
+        onCancel={() => setPending(null)}
+      />
+
+      {/* An override is a clinical disagreement with the engine. It is allowed,
+          and it is recorded, and the record has to say what the operator knew. */}
+      <ConfirmDialog
+        visible={pending?.kind === 'override'}
+        tone="danger"
+        title="Override the engine"
+        body={
+          pending ? (
+            <Stack gap="xs">
+              <KeyValue label="Facility">{pending.candidate.short_name}</KeyValue>
+              <KeyValue label="Engine says">{pending.blockers?.join('; ') ?? 'Not eligible'}</KeyValue>
+              <Small muted style={{ fontSize: 11 }}>
+                Committing against the engine's advice is allowed — the engine cannot see a phone call
+                from the receiving consultant. It is recorded against your account with the reason below.
+              </Small>
+            </Stack>
+          ) : null
+        }
+        confirmLabel="Override and commit"
+        requireReason
+        reasonLabel="Why are you overriding the engine?"
+        reasonHint="Recorded in the audit trail against your account. Minimum 12 characters."
+        busy={busy === 'dispatch' || busy === 'reroute'}
+        onConfirm={confirmPending}
+        onCancel={() => {
+          setPending(null);
+          if (blocked) setBlocked(null);
+        }}
+      />
     </AppShell>
   );
 }

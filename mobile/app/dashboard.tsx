@@ -1,8 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Pressable, RefreshControl, ScrollView, StyleSheet, View } from 'react-native';
 
+import { useLocalSearchParams } from 'expo-router';
+
 import { api, ApiError } from '../src/api/client';
 import type { Capacity, Doctor, FacilityDetail } from '../src/api/types';
+import { DutyBadge } from '../src/components/DutyPresence';
 import { ReportSheet } from '../src/components/ReportSheet';
 import { ageFromSeconds, countdown, relativeFromIso, specialtyLabel } from '../src/lib/format';
 import { useAuth } from '../src/state/AuthProvider';
@@ -61,6 +64,16 @@ import { useResponsive } from '../src/ui/useResponsive';
  * "Cardio" contributes nothing to that answer. Free text here would be a typo
  * away from a silent hole in statewide coverage.
  */
+/** The six shift patterns the pilot's facilities actually roster. */
+const SHIFT_PRESETS = [
+  '08:00 – 20:00',
+  '20:00 – 08:00',
+  '07:00 – 15:00',
+  '15:00 – 23:00',
+  '23:00 – 07:00',
+  '09:00 – 17:00',
+];
+
 const DOCTOR_SPECIALTIES: { value: string; label: string }[] = [
   { value: 'burns', label: 'Burns' },
   { value: 'cardiology', label: 'Cardiology' },
@@ -152,6 +165,11 @@ export default function HospitalDashboard() {
   const [busy, setBusy] = useState<string | null>(null);
   const [flash, setFlash] = useState<{ tone: 'live' | 'warm' | 'critical'; title: string; body?: string } | null>(null);
   const [inbound, setInbound] = useState<any[]>([]);
+  // Arriving from an inbox row ("Review inbound case") lands the reader on this
+  // screen; the banner says which part of it they came for, because a ward desk
+  // that has to hunt for the alert it just tapped is a ward desk on the phone.
+  const params = useLocalSearchParams<{ focus?: string }>();
+  const focusInbound = params.focus === 'inbound';
   const [answering, setAnswering] = useState<any | null>(null);
   const [acknowledged, setAcknowledged] = useState<Record<number, string>>({});
   const [draftDoctor, setDraftDoctor] = useState<DoctorDraft | null>(null);
@@ -562,8 +580,33 @@ export default function HospitalDashboard() {
           />
         ) : null}
 
+        {focusInbound && !inbound.length ? (
+          <Banner
+            tone="warm"
+            icon="inbox"
+            title="Nothing waiting at this desk"
+            body="The case you opened from your inbox has already been answered, or its hold expired before you got here. The next inbound alert will appear here the moment dispatch routes a case to this facility."
+          />
+        ) : null}
+
         {inbound.length ? (
-          <Card tone="critical" style={{ gap: space.md }}>
+          <Card
+            tone="critical"
+            style={{
+              gap: space.md,
+              ...(focusInbound
+                ? { borderWidth: 2, borderColor: t.status.critical.base }
+                : null),
+            }}
+          >
+            {focusInbound ? (
+              <Banner
+                tone="critical"
+                icon="ambulance"
+                title="From your inbox — this is the case you opened"
+                body="Answer it here: accept to confirm the ward is preparing, or decline with a reason and the hold releases immediately."
+              />
+            ) : null}
             <SectionHeader
               label="Inbound — prepare to receive"
               action={
@@ -865,13 +908,25 @@ export default function HospitalDashboard() {
                       onChangeText={(v) => setDraftDoctor((d) => ({ ...(d as DoctorDraft), designation: v }))}
                       style={{ flex: 1, minWidth: 160 }}
                     />
-                    <TextField
-                      label="Shift window"
-                      value={draftDoctor.shift_window}
-                      onChangeText={(v) => setDraftDoctor((d) => ({ ...(d as DoctorDraft), shift_window: v }))}
-                      placeholder="08:00 – 20:00"
-                      style={{ flex: 1, minWidth: 140 }}
-                    />
+                    {/* #27: this was a free-text box with a placeholder of
+                        "08:00 – 20:00", so a typo produced a shift window no
+                        scheduler could parse and no reader could trust. Shifts
+                        are one of six things in this state's hospitals; a picker
+                        cannot produce the seventh. */}
+                    <Stack gap={4} style={{ flex: 1, minWidth: 220 }}>
+                      <Label>Shift window</Label>
+                      <Row gap={6} wrap>
+                        {SHIFT_PRESETS.map((w) => (
+                          <Button
+                            key={w}
+                            label={w}
+                            size="sm"
+                            variant={draftDoctor.shift_window === w ? 'primary' : 'ghost'}
+                            onPress={() => setDraftDoctor((d) => ({ ...(d as DoctorDraft), shift_window: w }))}
+                          />
+                        ))}
+                      </Row>
+                    </Stack>
                   </Row>
 
                   <Stack gap="xs">
@@ -930,15 +985,31 @@ export default function HospitalDashboard() {
                     }}
                   >
                     <Stack gap="xxs" style={{ flex: 1, minWidth: 0 }}>
-                      <Body style={{ fontWeight: '600', fontSize: 13.5 }} numberOfLines={1}>
-                        {doc.full_name}
-                      </Body>
+                      <Row gap={space.sm} align="center" wrap>
+                        <Body style={{ fontWeight: '600', fontSize: 13.5 }} numberOfLines={1}>
+                          {doc.full_name}
+                        </Body>
+                        {/* #26: the row used to carry a bare switch, so the only
+                            statement about whether this clinician is here was
+                            the switch's position — and the switch showed the
+                            stored roster flag, which stays up after the window
+                            closes until the sweep runs. The badge is the same
+                            component the public directory uses, computed on
+                            read. */}
+                        <DutyBadge doctor={doc} compact emergency={doc.accepts_emergency} />
+                      </Row>
                       <Small muted style={{ fontSize: 11.5 }} numberOfLines={1}>
                         {specialtyLabel(doc.specialty)} · {doc.designation} · {doc.shift_window}
-                        {doc.accepts_emergency ? ' · takes referrals' : ''}
+                        {doc.roster_flag && !doc.on_duty ? ' · roster flag still up, window closed' : ''}
                       </Small>
                     </Stack>
-                    <SwitchRow label="" value={doc.on_duty} onChange={() => toggleDuty(doc)} />
+                    <Button
+                      label={doc.on_duty ? 'End duty' : 'Start duty'}
+                      size="sm"
+                      variant={doc.on_duty ? 'secondary' : 'primary'}
+                      onPress={() => toggleDuty(doc)}
+                      loading={busy === `doc:${doc.id}`}
+                    />
                     <Button label="Edit" size="sm" variant="ghost" onPress={() => setDraftDoctor(toDraft(doc))} />
                     <Button
                       label="Remove"
