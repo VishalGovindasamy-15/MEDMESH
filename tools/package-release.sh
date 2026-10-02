@@ -24,11 +24,12 @@ STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 
 echo "== staging a clean tree"
-# git archive honours .gitignore-independent export-ignore rules; but the
-# simplest honest filter is an explicit rsync, because the point of this script
-# is that the exclusion list is visible and reviewable.
-rsync -a \
-  --exclude '.git' \
+# The exclusion list is spelled out as tar --exclude flags rather than derived
+# from .gitignore, because the point of this script is that the list is visible
+# and reviewable — and because tar is POSIX-guaranteed while rsync is not
+# installed on every machine this will be run from.
+tar -C "$ROOT" \
+  --exclude './.git' \
   --exclude '.env' \
   --exclude '.env.local' \
   --exclude '.env.*.local' \
@@ -42,17 +43,17 @@ rsync -a \
   --exclude '.ios' \
   --exclude '.gradle' \
   --exclude '.cache' \
-  --exclude 'dist' \
-  --exclude 'dist-gmaps' \
+  --exclude './mobile/dist' \
+  --exclude './mobile/dist-gmaps' \
   --exclude 'web-build' \
-  --exclude 'out' \
+  --exclude './out' \
   --exclude '__pycache__' \
   --exclude '*.pyc' \
   --exclude '.pytest_cache' \
   --exclude '.DS_Store' \
   --exclude '*.keystore' --exclude '*.jks' \
   --exclude 'credentials.json' --exclude 'google-services.json' \
-  "$ROOT/" "$STAGE/medmesh/"
+  -cf - . | (mkdir -p "$STAGE/medmesh" && tar -C "$STAGE/medmesh" -xf -)
 
 echo "== checking the staged tree for anything that must not ship"
 BAD=0
