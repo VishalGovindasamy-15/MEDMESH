@@ -62,29 +62,45 @@ if (!crewRow?.linked_ambulance) {
 }
 const unit = crewRow.linked_ambulance;
 
-const created = await (await fetch(`${API}/incidents`, {
-  method: 'POST',
-  headers: H(dispatchTok),
-  body: JSON.stringify({
-    category: 'trauma_fall',
-    urgency: 'P2',
-    lat: 11.0168,
-    lng: 76.9558,
-    landmark: 'Lifecycle probe',
-    district_id: 1,
-    location_source: 'manual',
-  }),
-})).json();
-const incidentId = created.id;
-ok('incident created over HTTP', Boolean(incidentId), created.reference ?? '');
+// The vehicle may still be mid-trip from an earlier probe run (or from the
+// simulator). A unit that is not available cannot be dispatched, so walk any
+// live trip on it to handover first — the same release the pytest fixtures do.
+const LIVE = new Set(['open', 'dispatched', 'en_route', 'at_scene', 'patient_onboard', 'transporting', 'at_hospital']);
+{
+  const detail = await (await fetch(`${API}/ambulances/${unit.id}`, { headers: H(dispatchTok) })).json();
+  for (const item of detail.recent_incidents ?? []) {
+    if (!LIVE.has(item.status) || item.status === 'open') continue;
+    for (const step of ['en_route', 'at_scene', 'patient_onboard', 'at_hospital', 'handed_over']) {
+      await fetch(`${API}/incidents/${item.id}/status`, {
+        method: 'POST', headers: H(dispatchTok), body: JSON.stringify({ status: step }),
+      }).catch(() => {});
+    }
+  }
+}
 
-// The simulator auto-dispatches open incidents within seconds; claim it for
-// our unit explicitly and tolerate the 409 that means somebody already did.
+// The simulator auto-dispatches open incidents within seconds — to ANY unit,
+// which would put a stranger's trip on the crew screen. So create and claim
+// in one tight loop, and only accept a dispatch that landed on OUR unit;
+// otherwise cancel and try again.
+let created = null;
 let dispatched = null;
 for (let attempt = 0; attempt < 4 && !dispatched; attempt += 1) {
+  created = await (await fetch(`${API}/incidents`, {
+    method: 'POST',
+    headers: H(dispatchTok),
+    body: JSON.stringify({
+      category: 'trauma_fall',
+      urgency: 'P2',
+      lat: 11.0168,
+      lng: 76.9558,
+      landmark: 'Lifecycle probe',
+      district_id: 1,
+      location_source: 'manual',
+    }),
+  })).json();
   const shortlist = created.shortlist ?? [];
   const eligible = shortlist.find((s) => s.eligible) ?? shortlist[0];
-  const r = await fetch(`${API}/incidents/${incidentId}/dispatch`, {
+  const r = await fetch(`${API}/incidents/${created.id}/dispatch`, {
     method: 'POST',
     headers: H(dispatchTok),
     body: JSON.stringify({
@@ -93,24 +109,37 @@ for (let attempt = 0; attempt < 4 && !dispatched; attempt += 1) {
       hold_resource: 'bed',
     }),
   });
-  if (r.ok) dispatched = await r.json();
-  else if (r.status === 409) {
-    const body = await r.json().catch(() => ({}));
-    const cur = await (await fetch(`${API}/incidents/${incidentId}`, { headers: H(dispatchTok) })).json();
-    if (cur.status !== 'open') { dispatched = cur; break; } // raced, but dispatched
-    if (attempt === 3) console.log('  dispatch 409:', JSON.stringify(body).slice(0, 160));
-  } else {
-    console.log('  dispatch failed', r.status, (await r.text()).slice(0, 160));
+  if (r.ok) {
+    const row = await r.json();
+    if (row.assigned_ambulance_id === unit.id) dispatched = row;
   }
-  await new Promise((res) => setTimeout(res, 700));
+  if (!dispatched) {
+    // raced or refused — cancel and retry so the crew screen cannot end up
+    // showing a trip the simulator assigned to somebody else.
+    await fetch(`${API}/incidents/${created.id}/status`, {
+      method: 'POST', headers: H(dispatchTok), body: JSON.stringify({ status: 'cancelled' }),
+    }).catch(() => {});
+    await new Promise((res) => setTimeout(res, 500));
+  }
 }
+const incidentId = created?.id;
+ok('incident created over HTTP', Boolean(incidentId), created?.reference ?? '');
 ok('incident dispatched to the crew vehicle', Boolean(dispatched), dispatched?.status ?? 'none');
+if (!dispatched) {
+  await browser.close();
+  process.exit(1);
+}
 
 /* ------------------------------------------------ the crew walks the trip -- */
 const ctx = await browser.newContext({ viewport: { width: 390, height: 844, isMobile: true, hasTouch: true } });
 const page = await ctx.newPage();
 await signInPage(page, 'crew@medmesh.in', 'Crew@108');
 
+/* [stage, button that reaches it, what the dominant band must read at it].
+   The band is checked AFTER the advance and again AFTER a full page reload —
+   the reload is the point of #11 (the app is killed and reopened constantly)
+   and the band text is the point of #13 (state must be readable, not
+   inferred from which button is highlighted). */
 const STAGES = [
   ['dispatched', null, /Dispatched|Assigned/i],
   ['en_route', 'Accept & go', /En route|Accepted/i],
@@ -122,30 +151,50 @@ const STAGES = [
 ];
 
 for (const [stage, buttonLabel, expectBand] of STAGES) {
-  // #11: refresh at every stage — the app is killed and reopened constantly.
-  await page.goto(`${BASE}/crew`, { waitUntil: 'domcontentloaded' });
-  await page.waitForTimeout(3000);
-  let body = await page.innerText('body');
-  ok(
-    `refresh at ${stage}: trip is still on screen`,
-    new RegExp(created.reference ?? 'TN-', 'i').test(body) || /This job/i.test(body),
-  );
-  // #13: the current state is the dominant thing on the screen.
-  ok(`refresh at ${stage}: dominant state band reads correctly`, /This job/i.test(body) && expectBand.test(body), (body.match(/This job\s*\n([^\n]+)/i) || [])[1]);
-
+  // Handover ENDS the trip: the crew screen deliberately stops showing a
+  // dominant trip band and stands by with the receipt instead (checked below).
+  // Walking it through the mid-trip assertions would assert against a screen
+  // that is correct precisely because it no longer shows the trip.
+  if (stage === 'handed_over') {
+    const btn = page.getByRole('button', { name: /^Handover complete/i }).first();
+    if (await btn.count()) {
+      await btn.click();
+      await page.waitForTimeout(2500);
+      const apiRow = await (await fetch(`${API}/incidents/${incidentId}`, { headers: H(dispatchTok) })).json();
+      ok('advance to handed_over recorded server-side', apiRow.status === 'handed_over', apiRow.status);
+    } else {
+      ok('advance to handed_over recorded server-side', false, 'button "Handover complete" not found');
+    }
+    break;
+  }
   if (buttonLabel) {
     const btn = page.getByRole('button', { name: new RegExp(`^${buttonLabel}`, 'i') }).first();
     if (await btn.count()) {
       await btn.click();
       await page.waitForTimeout(2500);
-      const after = await page.innerText('body');
       const apiRow = await (await fetch(`${API}/incidents/${incidentId}`, { headers: H(dispatchTok) })).json();
       ok(`advance to ${stage} recorded server-side`, apiRow.status === stage, apiRow.status);
-      ok(`advance to ${stage} reflected without refresh`, expectBand.test(after) || /This job/i.test(after));
+      const after = await page.innerText('body');
+      ok(`advance to ${stage} shown without refresh`, /This job/i.test(after) && expectBand.test(after), (after.match(/This job\s*\n([^\n]+)/i) || [])[1]);
     } else {
       ok(`advance to ${stage} recorded server-side`, false, `button "${buttonLabel}" not found`);
     }
   }
+
+  // #11: kill and reopen the app at this stage.
+  await page.goto(`${BASE}/crew`, { waitUntil: 'domcontentloaded' });
+  await page.waitForTimeout(3000);
+  const body = await page.innerText('body');
+  ok(
+    `refresh at ${stage}: trip is still on screen`,
+    new RegExp(created.reference ?? 'TN-', 'i').test(body) || /This job/i.test(body),
+  );
+  // #13: the current state is the dominant thing on the screen.
+  ok(
+    `refresh at ${stage}: dominant state band reads correctly`,
+    /This job/i.test(body) && expectBand.test(body),
+    (body.match(/This job\s*\n([^\n]+)/i) || [])[1],
+  );
 }
 
 await page.screenshot({ path: `${SHOTS}/98-crew-handover.png` }).catch(() => {});

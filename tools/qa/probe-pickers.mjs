@@ -40,6 +40,14 @@ async function signIn(page, email, password) {
   await page.waitForTimeout(3000);
 }
 
+
+/* The pickers render inline, so "is X inside the picker" cannot be answered
+   from body text — the page behind still contains its own "All districts"
+   button. Scope to the ancestor box that holds the panel's own heading. */
+function panel(page, anchor) {
+  return page.getByText(anchor).first().locator('xpath=ancestor::div[3]');
+}
+
 async function tokenOf(page) {
   return page.evaluate(() => localStorage.getItem('medmesh.token'));
 }
@@ -53,13 +61,13 @@ async function tokenOf(page) {
   await page.waitForTimeout(3500);
 
   /* ------------------------------------------- #2 create-user, per role ---- */
-  await page.getByRole('button', { name: /create account/i }).first().click();
+  await page.getByRole('button', { name: /add a user/i }).first().click();
   await page.waitForTimeout(1200);
   let body = await page.innerText('body');
   ok('create form is open', /Initial password/i.test(body));
 
   // hospital_admin: Facility only, no district jurisdiction field.
-  await page.getByRole('button', { name: /^Hospital$/i }).first().click();
+  await page.getByRole('tab', { name: /^Hospital$/i }).first().click();
   await page.waitForTimeout(700);
   body = await page.innerText('body');
   ok(
@@ -72,9 +80,14 @@ async function tokenOf(page) {
     await page.waitForTimeout(900);
     body = await page.innerText('body');
     // #8: the facility picker carries a real district section, not 8 chips.
+    // Placeholders never appear in innerText — count the input itself.
+    const searchInputs = await page.getByPlaceholder('Search facility by name or district').count();
+    const facPanel = panel(page, 'Choose a facility|Facility this account reports for');
+    const panelText = (await facPanel.innerText().catch(() => body));
     ok(
       'facility picker has a district filter section',
-      /All districts/i.test(body) && /Search facility/i.test(body),
+      searchInputs > 0 && /All districts/i.test(panelText) && /District/i.test(panelText),
+      `inputs=${searchInputs}`,
     );
     await page.getByText('Close', { exact: true }).last().click().catch(() => {});
     await page.waitForTimeout(500);
@@ -83,7 +96,7 @@ async function tokenOf(page) {
   }
 
   // dispatcher: Jurisdiction picker, no All row.
-  await page.getByRole('button', { name: /^Dispatcher$/i }).first().click();
+  await page.getByRole('tab', { name: /^Dispatcher$/i }).first().click();
   await page.waitForTimeout(700);
   body = await page.innerText('body');
   ok('dispatcher form says Jurisdiction', /Jurisdiction/i.test(body));
@@ -108,7 +121,7 @@ async function tokenOf(page) {
   ok('jurisdiction picker applies the choice', /Salem/i.test(body) && !/Choose a district/i.test(body));
 
   // driver: Reporting district + Vehicle picker.
-  await page.getByRole('button', { name: /^Crew$/i }).first().click();
+  await page.getByRole('tab', { name: /^Crew$/i }).first().click();
   await page.waitForTimeout(700);
   body = await page.innerText('body');
   ok('driver form says Reporting district', /Reporting district/i.test(body));
@@ -148,15 +161,26 @@ async function tokenOf(page) {
       const t2 = await page.innerText('body');
       if (/Save changes/i.test(t2) && /Jurisdiction/i.test(t2)) {
         editedDispatcher = true;
-        // open the jurisdiction picker: must be the searchable one, no All row
-        await page.getByText(/Choose district|Salem|Coimbatore|Madurai|Chennai/i).first().click().catch(() => {});
-        await page.waitForTimeout(800);
+        // open the jurisdiction picker inside the edit panel only — the user
+        // list behind it also contains district names, and .first() hit that.
+        // Open the jurisdiction picker inside the edit panel. The panel's
+        // DistrictField button is the only control on the page carrying
+        // aria-expanded, so that attribute is the locator — the user list
+        // behind the panel also contains district names and .first() hit that.
+        // The panel's DistrictField button reads "<District> · 12 facilities";
+        // that shape is unique to the field while the panel is open.
+        await page.getByRole('button', { name: /\d+ facilities/i }).first().click({ timeout: 5000 }).catch(() => {});
+        await page.waitForTimeout(900);
         const t3 = await page.innerText('body');
-        ok(
-          'edit-user district control is the searchable picker',
-          /Choose a district/i.test(t3) && /of 38 shown/i.test(t3),
-        );
-        ok('edit-user picker hides "All districts"', !/All districts/i.test(t3));
+        const pickerOpen = /Choose a district/i.test(t3) && /of 38 shown/i.test(t3);
+        ok('edit-user district control is the searchable picker', pickerOpen);
+        if (pickerOpen) {
+          const dp = panel(page, 'Choose a district');
+          const dpText = await dp.innerText().catch(() => '');
+          ok('edit-user picker hides "All districts"', !/All districts/i.test(dpText));
+        } else {
+          ok('edit-user picker hides "All districts"', false, 'picker did not open');
+        }
         await page.getByText('Close', { exact: true }).last().click().catch(() => {});
         await page.waitForTimeout(400);
       }
@@ -171,7 +195,7 @@ async function tokenOf(page) {
   await page.getByText(/^Fleet \d+/i).first().click();
   await page.waitForTimeout(2500);
   body = await page.innerText('body');
-  ok('fleet tab lists the units', /\d+ units|TN-108/i.test(body));
+  ok('fleet tab lists the units', /\d+ units|108-TN[A-Z]{3}/i.test(body));
 
   // #5: the filter is the All-supporting picker, counted in units.
   const filterField = page.getByText(/^All districts$/i).first();
@@ -190,14 +214,14 @@ async function tokenOf(page) {
   await page.waitForTimeout(1200);
   body = await page.innerText('body');
   ok('fleet filter applies Salem', /Salem/i.test(body));
-  const salemUnits = (body.match(/TN-108-[A-Z0-9-]+/g) || []).length;
+  const salemUnits = (body.match(/108-TN[A-Z]{3}-\d{4}/g) || []).length;
   // clear back through the picker's All row
   await page.getByText(/^Salem$/i).first().click();
   await page.waitForTimeout(800);
   await page.getByText(/^All districts$/i).first().click();
   await page.waitForTimeout(1200);
   body = await page.innerText('body');
-  ok('fleet filter clears back to all', (body.match(/TN-108-[A-Z0-9-]+/g) || []).length > salemUnits);
+  ok('fleet filter clears back to all', (body.match(/108-TN[A-Z]{3}-\d{4}/g) || []).length > salemUnits, `${salemUnits} → ${(body.match(/108-TN[A-Z]{3}-\d{4}/g) || []).length}`);
   await page.screenshot({ path: `${SHOTS}/91-fleet-filter.png` });
 
   // #4: the create form's base-district picker must NOT offer All.
@@ -209,7 +233,13 @@ async function tokenOf(page) {
   await page.waitForTimeout(900);
   body = await page.innerText('body');
   ok('vehicle form picker is searchable', /Choose a district/i.test(body) && /38 of 38 shown/i.test(body));
-  ok('vehicle form picker has no All row', !/All districts/i.test(body));
+  {
+    // The filter field behind the form says "All districts"; only the panel's
+    // own text answers whether the FORM picker offers that row.
+    const dp = panel(page, 'Choose a district');
+    const dpText = await dp.innerText().catch(() => body);
+    ok('vehicle form picker has no All row', !/All districts/i.test(dpText));
+  }
   await page.getByText('Close', { exact: true }).last().click().catch(() => {});
   await page.waitForTimeout(400);
   await page.getByRole('button', { name: /^Close$/i }).first().click().catch(() => {});
@@ -220,14 +250,27 @@ async function tokenOf(page) {
   await firstEdit.click();
   await page.waitForTimeout(1400);
   body = await page.innerText('body');
-  const editDistrictBtn = page.getByText(/Select district|^[A-Z][a-z]+(puram| Nadu|batore| Chennai| Madurai)$/i).first();
-  await editDistrictBtn.click().catch(() => {});
+  const modalHead = (body.match(/Edit (108-[A-Z0-9-]+)/i) || [])[1];
+  ok('edit-vehicle modal is open', Boolean(modalHead), modalHead ?? '');
+  // The modal's district field has showCount off, so its button reads as the
+  // unit's current base district with no count to match on. Anchor on the
+  // field's own label instead: the modal's "Base district" is the last on the
+  // page (the filter's is behind the overlay), and the field button is the
+  // next role=button after it in document order.
+  await page.getByText(/^Base district$/i).last()
+    .locator('xpath=following::*[@role="button"][1]')
+    .click({ timeout: 5000 }).catch(() => {});
   await page.waitForTimeout(900);
   body = await page.innerText('body');
-  ok(
-    'edit-vehicle district control is the searchable picker, no All row',
-    /Choose a district/i.test(body) && !/All districts/i.test(body),
-  );
+  {
+    const opened = /Choose a district/i.test(body);
+    const dp = panel(page, 'Choose a district');
+    const dpText = opened ? await dp.innerText().catch(() => '') : '';
+    ok(
+      'edit-vehicle district control is the searchable picker, no All row',
+      opened && /38 of 38 shown/i.test(dpText) && !/All districts/i.test(dpText),
+    );
+  }
   await page.screenshot({ path: `${SHOTS}/92-fleet-edit.png` });
   await page.getByText('Close', { exact: true }).last().click().catch(() => {});
   await page.waitForTimeout(400);
@@ -282,17 +325,17 @@ async function tokenOf(page) {
   body = await page.innerText('body');
   const districtBtn = page.getByText(/^Select district$/i).first();
   ok('#1 onboarding district control is a picker button', await districtBtn.count() > 0);
-  ok('#1 onboarding no longer renders 38 district buttons', !(await page.getByRole('button', { name: /Kanniyakumari/i }).count()));
+  ok('#1 onboarding no longer renders 38 district buttons', !(await page.getByRole('button', { name: /Kanyakumari/i }).count()));
   if (await districtBtn.count()) {
     await districtBtn.click();
     await page.waitForTimeout(900);
     body = await page.innerText('body');
     ok('onboarding picker is searchable, all 38', /Choose a district/i.test(body) && /38 of 38 shown/i.test(body));
     ok('onboarding picker has no All row (a facility is somewhere)', !/All districts/i.test(body));
-    await page.getByPlaceholder('District or headquarters').fill('kanniyakumari');
+    await page.getByPlaceholder('District or headquarters').fill('kanyakumari');
     await page.waitForTimeout(600);
     body = await page.innerText('body');
-    ok('onboarding picker finds Kanniyakumari by search', /1 of 38 shown/i.test(body));
+    ok('onboarding picker finds Kanyakumari by search', /1 of 38 shown/i.test(body), (body.match(/\d+ of 38 shown/i) || [])[0]);
     await page.screenshot({ path: `${SHOTS}/94-onboard-district.png` });
     await page.getByText('Close', { exact: true }).last().click().catch(() => {});
   }
@@ -324,10 +367,20 @@ async function tokenOf(page) {
   ok('#14 exact sources are badged ● EXACT', (body.match(/● EXACT/g) || []).length >= 3, `${(body.match(/● EXACT/g) || []).length} badges`);
   ok('#14 the fallback is badged ○ APPROX', /○ APPROX/i.test(body));
 
-  const latestIncident = async () => {
-    const r = await fetch(`${API}/incidents?limit=1`, { headers: { Authorization: `Bearer ${token}` } });
+  /* The simulator raises its own incidents, so "the newest incident" is not
+     reliably the one this probe just created. Capture the reference the
+     console shows after creation and fetch that record by reference. */
+  let lastRef = null;
+  const latestIncident = async (page) => {
+    const body = await page.innerText('body').catch(() => '');
+    const refs = [...body.matchAll(/TN-\d{4}-[A-Z0-9]{3}/g)].map((m) => m[0]);
+    const ref = refs.length ? refs[refs.length - 1] : lastRef;
+    const r = await fetch(`${API}/incidents?limit=25`, { headers: { Authorization: `Bearer ${token}` } });
     const j = await r.json();
-    return (j.results ?? [])[0] ?? null;
+    const rows = j.results ?? [];
+    const byRef = ref ? rows.find((x) => x.reference === ref) : null;
+    if (byRef) lastRef = byRef.reference;
+    return byRef ?? rows[0] ?? null;
   };
 
   /* ---- source 1: caller coordinates ---- */
@@ -341,7 +394,7 @@ async function tokenOf(page) {
   ok('coordinates fix badged ● EXACT', /● EXACT/i.test(body) && /from the caller's coordinates/i.test(body));
   await page.getByRole('button', { name: /Create incident & find hospital/i }).first().click();
   await page.waitForTimeout(3500);
-  let inc = await latestIncident();
+  let inc = await latestIncident(page);
   ok('incident created from caller coordinates', Boolean(inc) && inc.location_source === 'manual', inc ? inc.location_source : 'none');
   ok('coordinates record is not approximate', Boolean(inc) && inc.location_approximate === false);
 
@@ -361,7 +414,7 @@ async function tokenOf(page) {
   ok('device fix badged ● EXACT and attributed', /● EXACT/i.test(body) && /from this device/i.test(body));
   await page.getByRole('button', { name: /Create incident & find hospital/i }).first().click();
   await page.waitForTimeout(3500);
-  inc = await latestIncident();
+  inc = await latestIncident(page);
   ok('incident created from device GPS', Boolean(inc) && inc.location_source === 'gps', inc ? inc.location_source : 'none');
 
   await page.goto(`${BASE}/console`, { waitUntil: 'domcontentloaded' });
@@ -386,7 +439,7 @@ async function tokenOf(page) {
     ok('map pin produced a real coordinate', /1[01]\.\d{5}, 7[67]\.\d{5}/.test(body), (body.match(/1[01]\.\d{5}, 7[67]\.\d{5}/) || [])[0]);
     await page.getByRole('button', { name: /Create incident & find hospital/i }).first().click();
     await page.waitForTimeout(3500);
-    inc = await latestIncident();
+    inc = await latestIncident(page);
     ok('incident created from map pin', Boolean(inc) && inc.location_source === 'map', inc ? inc.location_source : 'none');
   }
 
@@ -407,7 +460,7 @@ async function tokenOf(page) {
   await page.screenshot({ path: `${SHOTS}/95-location-approx.png` });
   await page.getByRole('button', { name: /Create incident & find hospital/i }).first().click();
   await page.waitForTimeout(3500);
-  inc = await latestIncident();
+  inc = await latestIncident(page);
   ok('incident created from district centre', Boolean(inc) && inc.location_source === 'district', inc ? inc.location_source : 'none');
   ok('district centre record IS flagged approximate', Boolean(inc) && inc.location_approximate === true);
 
