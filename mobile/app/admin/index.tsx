@@ -18,7 +18,7 @@ import type {
   OnboardingApplication,
   Role,
 } from '../../src/api/types';
-import { FacilityPicker } from '../../src/components/Selectors';
+import { DistrictField, FacilityPicker, VehicleField } from '../../src/components/Selectors';
 import { relativeFromIso } from '../../src/lib/format';
 import { useAuth } from '../../src/state/AuthProvider';
 import type { Tokens } from '../../src/theme/tokens';
@@ -258,7 +258,11 @@ export default function AdminConsole() {
         {error ? <Banner tone="critical" icon="alert" title="Could not load everything" body={error} /> : null}
 
         <Row gap={space.md} wrap>
+          {/* scroll: the five tab labels need ~500px; letting them wrap inside
+              the segmented row is how this page keeps working at 360px. */}
           <Segmented
+            size="sm"
+            scroll
             value={tab}
             onChange={setTab}
             options={[
@@ -593,8 +597,11 @@ function UsersPanel({
   return (
     <Stack gap={space.lg}>
       <Card>
-        <Row justify="space-between" align="center" wrap gap={space.md}>
-          <Stack gap={2}>
+        /* align flex-start, not center: on a wrapping row the default
+           alignment lets the button column keep its intrinsic width on a
+           narrow phone instead of moving under the title. */
+        <Row justify="space-between" align="flex-start" wrap gap={space.md}>
+          <Stack gap={2} style={{ flexShrink: 1 }}>
             <SectionHeader label="Who can do what" />
             <Small muted>
               Accounts are the only way into the platform; there is no self-service sign-up above citizen level.
@@ -676,6 +683,7 @@ function UsersPanel({
                       districts={pickerDistricts}
                       value={form.hospital_id ? Number(form.hospital_id) : null}
                       title="Facility this account reports for"
+                      districtField
                       onPick={(id) => {
                         setForm((prev) => ({ ...prev, hospital_id: String(id) }));
                         setFacilityPickerOpen(false);
@@ -703,13 +711,16 @@ function UsersPanel({
 
               {form.role !== 'hospital_admin' ? (
                 <Stack gap="sm">
-                  <Label>Jurisdiction</Label>
-                  <Segmented
-                    size="sm"
-                    scroll
-                    value={form.district_id}
-                    onChange={(v) => setForm((f) => ({ ...f, district_id: v }))}
-                    options={districtOptions.map((d) => ({ value: String(d.id), label: d.name }))}
+                  {/* Role-specific wording (#9): "jurisdiction" is what a
+                      dispatcher or official is scoped to; a driver's district
+                      is where they report. Same control, honest label. */}
+                  <DistrictField
+                    districts={pickerDistricts}
+                    value={form.district_id ? Number(form.district_id) : null}
+                    onChange={(id) => setForm((f) => ({ ...f, district_id: String(id) }))}
+                    label={form.role === 'driver' ? 'Reporting district' : 'Jurisdiction'}
+                    placeholder="Choose district"
+                    hideAll
                   />
                   <Small muted>
                     {form.role === 'driver'
@@ -736,18 +747,15 @@ function UsersPanel({
                     </Small>
                   ) : (
                     <>
-                      <Segmented
-                        size="sm"
-                        scroll
-                        value={form.ambulance_id}
-                        onChange={(v) => setForm((f) => ({ ...f, ambulance_id: v }))}
-                        options={[
-                          { value: '', label: 'Link later' },
-                          ...crewless.map((a) => ({
-                            value: String(a.id),
-                            label: `${a.call_sign} · ${a.capability_label}`,
-                          })),
-                        ]}
+                      <VehicleField
+                        vehicles={crewless}
+                        districts={pickerDistricts}
+                        value={form.ambulance_id ? Number(form.ambulance_id) : null}
+                        onChange={(id) => setForm((f) => ({ ...f, ambulance_id: id ? String(id) : '' }))}
+                        label="Vehicle"
+                        placeholder={`Choose from ${crewless.length} uncrewed vehicles`}
+                        clearLabel="Link later"
+                        title="Vehicles without a crew"
                       />
                       <Small muted>
                         Only vehicles without a crew are listed. Moving a driver between vehicles is
@@ -777,6 +785,7 @@ function UsersPanel({
       <Row gap={space.sm} wrap>
         <Segmented
           size="sm"
+          scroll
           value={roleFilter}
           onChange={setRoleFilter}
           options={[
@@ -842,7 +851,9 @@ function UsersPanel({
                 {u.last_login_at ? relativeFromIso(u.last_login_at) : 'never'}
               </Small>
             ) : null}
-            <Row gap={space.sm} align="center" style={styles.cState}>
+            {/* wrap: role + state + "last seen" is ~270px of text; without
+                wrap it keeps the card 623px wide on a 360px phone. */}
+            <Row gap={space.sm} align="center" wrap style={styles.cState}>
               <StatusDot tone={u.is_active ? 'live' : 'neutral'} />
               <Small muted>{u.is_active ? 'active' : 'disabled'}</Small>
               <Button label="Edit" size="sm" variant="ghost" onPress={() => startEdit(u)} />
@@ -906,6 +917,7 @@ function UsersPanel({
                   districts={pickerDistricts}
                   value={editForm.hospital_id ? Number(editForm.hospital_id) : null}
                   title="Facility this account reports for"
+                  districtField
                   onPick={(id) => {
                     setEditForm((f) => ({ ...f, hospital_id: String(id) }));
                     setFacilityPickerForEdit(false);
@@ -927,31 +939,33 @@ function UsersPanel({
           ) : null}
 
           {editForm.role === 'dispatcher' || editForm.role === 'gov_official' ? (
-            <Stack gap={6}>
-              <Label>Jurisdiction</Label>
-              <Segmented
-                size="sm"
-                scroll
-                value={editForm.district_id}
-                onChange={(v) => setEditForm((f) => ({ ...f, district_id: v }))}
-                options={districts.map((d) => ({ value: String(d.id), label: d.name }))}
-              />
-            </Stack>
+            <DistrictField
+              districts={pickerDistricts}
+              value={editForm.district_id ? Number(editForm.district_id) : null}
+              onChange={(id) => setEditForm((f) => ({ ...f, district_id: String(id) }))}
+              label="Jurisdiction"
+              placeholder="Choose district"
+              hideAll
+            />
           ) : null}
 
           {editForm.role === 'driver' ? (
             <Stack gap={6}>
-              <Label>Vehicle — optional, a crew account can be unlinked</Label>
-              <Segmented
-                size="sm"
-                scroll
-                value={editForm.ambulance_id || 'none'}
-                onChange={(v) => setEditForm((f) => ({ ...f, ambulance_id: v === 'none' ? '' : v }))}
-                options={[
-                  { value: 'none', label: 'No vehicle' },
-                  ...fleet.map((a) => ({ value: String(a.id), label: a.call_sign })),
-                ]}
+              <VehicleField
+                vehicles={fleet}
+                districts={pickerDistricts}
+                value={editForm.ambulance_id ? Number(editForm.ambulance_id) : null}
+                onChange={(id) => setEditForm((f) => ({ ...f, ambulance_id: id ? String(id) : '' }))}
+                label="Vehicle — optional, a crew account can be unlinked"
+                placeholder={`Choose from ${fleet.length} vehicles`}
+                clearLabel="No vehicle"
+                title="Link this account to a vehicle"
               />
+              <Small muted>
+                The whole fleet is listed here, not only uncrewed units: re-linking an account to a
+                vehicle that already has a driver moves them, and the previous vehicle is released in
+                the same request.
+              </Small>
             </Stack>
           ) : null}
 
@@ -1210,8 +1224,8 @@ function ConnectorsPanel({
       ) : null}
 
       <Card>
-        <Row justify="space-between" align="center" wrap gap={space.md}>
-          <Stack gap={2}>
+        <Row justify="space-between" align="flex-start" wrap gap={space.md}>
+          <Stack gap={2} style={{ flexShrink: 1 }}>
             <SectionHeader label="Connect an existing system" />
             <Small muted>
               One canonical FHIR mapping first, vendor aliases second, the keypad last — the order the
@@ -1242,6 +1256,7 @@ function ConnectorsPanel({
                   districts={pickerDistricts}
                   value={facilityId ? Number(facilityId) : null}
                   title="Facility this connector reports for"
+                  districtField
                   onPick={(id) => {
                     setFacilityId(String(id));
                     setConnectorPickerOpen(false);
@@ -1426,7 +1441,7 @@ function ConnectorsPanel({
         <Stack gap={space.sm}>
           {templates.map((tp) => (
             <View key={tp.kind}>
-              <Row justify="space-between" align="center" wrap gap={space.md}>
+              <Row justify="space-between" align="flex-start" wrap gap={space.md}>
                 <Stack gap={2} style={{ flex: 1 }}>
                   <Row gap={space.sm} align="center">
                     <Heading style={{ fontSize: 14 }}>{tp.label}</Heading>
@@ -1576,8 +1591,8 @@ function ComplaintsPanel({
   return (
     <Stack gap={space.lg}>
       <Card>
-        <Row justify="space-between" align="center" wrap gap={space.md}>
-          <Stack gap={2}>
+        <Row justify="space-between" align="flex-start" wrap gap={space.md}>
+          <Stack gap={2} style={{ flexShrink: 1 }}>
             <SectionHeader label="Reported inaccuracies" />
             <Small muted>
               These are the only external check on self-reported capacity. A facility with several open reports is
@@ -2064,10 +2079,12 @@ const styles = StyleSheet.create({
     borderBottomWidth: StyleSheet.hairlineWidth,
     gap: space.md,
   },
-  cName: { flex: 3, minWidth: 150 },
-  cRole: { flex: 2, minWidth: 110 },
+  /* minWidths are what keep the mobile card's columns side by side instead of
+     collapsing; they are sized so the whole row still fits a 360px phone. */
+  cName: { flex: 5, minWidth: 110 },
+  cRole: { flex: 3, minWidth: 84 },
   cKind: { flex: 2, minWidth: 100 },
-  cScope: { flex: 2, minWidth: 100 },
+  cScope: { flex: 4, minWidth: 104 },
   cSeen: { flex: 2, minWidth: 100 },
   cState: { flex: 3, minWidth: 140 },
   aTime: { flex: 1, minWidth: 84 },

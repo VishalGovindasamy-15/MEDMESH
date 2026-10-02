@@ -72,6 +72,18 @@ export function MapSurface(props: MapSurfaceProps) {
 
   const google = hasGoogleMaps();
 
+  /**
+   * Measured width of the surface's own box.
+   *
+   * The schematic canvas needs a pixel width to project into, and callers on a
+   * phone do not know theirs — a hardcoded `width ?? 360` default overflowed a
+   * 360px viewport by exactly the page padding, which is how the console map
+   * ended up horizontally scrollable on the smallest phones we support. The
+   * box measures itself and the canvas uses the measurement until a caller
+   * supplies an explicit width.
+   */
+  const [measured, setMeasured] = React.useState<number | null>(null);
+
   // Real road geometry when a Directions key exists; null means "draw the
   // schematic corridor", which is also what happens if the API errors.
   const [resolved, setResolved] = React.useState<RouteResult | null>(null);
@@ -103,7 +115,13 @@ export function MapSurface(props: MapSurfaceProps) {
   const showCorridorFallback = Boolean(route) && !routePath && !routing;
 
   return (
-    <View style={{ gap: space.sm }}>
+    <View
+      style={{ gap: space.sm }}
+      onLayout={(e) => {
+        const w = e.nativeEvent.layout.width;
+        if (Number.isFinite(w) && w > 0) setMeasured((prev) => (prev === w ? prev : w));
+      }}
+    >
       {google ? (
         <GoogleMap
           points={points}
@@ -121,7 +139,7 @@ export function MapSurface(props: MapSurfaceProps) {
       ) : (
         <MapCanvas
           points={points}
-          width={width ?? 360}
+          width={width ?? measured ?? 320}
           height={height}
           selectedId={selectedId}
           onSelect={onSelect}
@@ -150,27 +168,31 @@ export function MapSurface(props: MapSurfaceProps) {
       {showLegend ? (
         <Row gap={space.md} wrap align="center">
           {google ? (
-            <Row gap={space.xs} align="center">
-              <Small muted>Basemap · Google Maps</Small>
+            <Row gap={space.xs} align="center" style={{ flexShrink: 1 }}>
+              <Small muted numberOfLines={1}>Basemap · Google Maps</Small>
             </Row>
           ) : (
-            <Row gap={space.xs} align="center">
-              <Small muted>Schematic view · set EXPO_PUBLIC_GOOGLE_MAPS_API_KEY for live tiles</Small>
+            /* flexShrink + numberOfLines: this sentence is longer than a 360px
+               phone, and RN-web text will not shrink below its content width
+               unless the row says so — the legend was the widest element on
+               the crew screen at small viewports. */
+            <Row gap={space.xs} align="center" style={{ flexShrink: 1 }}>
+              <Small muted numberOfLines={2}>Schematic view · set EXPO_PUBLIC_GOOGLE_MAPS_API_KEY for live tiles</Small>
             </Row>
           )}
           <LegendDot tone="live" label="ICU free" />
           <LegendDot tone="warm" label="Beds only" />
           <LegendDot tone="critical" label="At capacity" />
           <LegendDot tone="neutral" label="No live data" />
-          {routing ? <Small muted>Resolving road route…</Small> : null}
+          {routing ? <Small muted style={{ flexShrink: 1 }}>Resolving road route…</Small> : null}
           {resolved ? (
-            <Small muted>
+            <Small muted style={{ flexShrink: 1 }} numberOfLines={2}>
               Directions: {resolved.distanceKm.toFixed(1)} km · {resolved.durationMinutes} min
               {resolved.summary ? ` via ${resolved.summary}` : ''}
             </Small>
           ) : null}
           {route && !resolved && !routing && hasDirections() ? (
-            <Small muted>Directions unavailable — corridor shown is an estimate</Small>
+            <Small muted style={{ flexShrink: 1 }} numberOfLines={2}>Directions unavailable — corridor shown is an estimate</Small>
           ) : null}
         </Row>
       ) : null}

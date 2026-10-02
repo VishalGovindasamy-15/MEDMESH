@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useRef } from 'react';
 import { Pressable, StyleSheet, View } from 'react-native';
 import Svg, { Circle, G, Line, Path, Rect, Text as SvgTextNode } from 'react-native-svg';
 
@@ -63,6 +63,9 @@ export function MapCanvas({
   onPress,
 }: Props) {
   const { t } = useTheme();
+  /** Ref for the tap-to-place layer, used to convert pageX/pageY into
+      layer-relative coordinates when locationX/locationY are missing. */
+  const tapLayerRef = useRef<View>(null);
 
   /**
    * Two projection modes.
@@ -87,10 +90,18 @@ export function MapCanvas({
         x: width / 2 + ((p.lng - center.lng) * 111320 * Math.cos((center.lat * Math.PI) / 180)) / metresPerPixel,
         y: height / 2 - ((p.lat - center.lat) * 110540) / metresPerPixel,
       });
-      const toLatLng = (x: number, y: number) => ({
-        lat: center.lat - ((y - height / 2) * metresPerPixel) / 110540,
-        lng: center.lng + ((x - width / 2) * metresPerPixel) / (111320 * Math.cos((center.lat * Math.PI) / 180)),
-      });
+      const toLatLng = (x: number, y: number) => {
+        // NaN in, NaN out is how a pin ended up at "NaN, NaN": RN-web does not
+        // always populate locationX/locationY (Safari, and synthetic events
+        // over nested pressables). The caller falls back to pageX/pageY, and
+        // this guard turns anything still non-finite into a refusal rather
+        // than a coordinate that will be posted to the API.
+        if (!Number.isFinite(x) || !Number.isFinite(y)) return { lat: NaN, lng: NaN };
+        return {
+          lat: center.lat - ((y - height / 2) * metresPerPixel) / 110540,
+          lng: center.lng + ((x - width / 2) * metresPerPixel) / (111320 * Math.cos((center.lat * Math.PI) / 180)),
+        };
+      };
       return { toXY, toLatLng };
     }
     return {
@@ -380,9 +391,35 @@ export function MapCanvas({
           fixed projection -- see the note on `projection` above. */}
       {onPress && projection.toLatLng ? (
         <Pressable
+          ref={tapLayerRef}
           onPress={(event) => {
-            const { locationX, locationY } = event.nativeEvent;
-            onPress(projection.toLatLng!(locationX, locationY));
+            const native = event.nativeEvent as {
+              locationX?: number;
+              locationY?: number;
+              pageX?: number;
+              pageY?: number;
+            };
+            let x = native.locationX;
+            let y = native.locationY;
+            // RN-web leaves locationX/locationY undefined on some browsers and
+            // on synthetic events that bubbled through nested pressables — the
+            // pin then landed at NaN. pageX/pageY minus the layer's own window
+            // offset is the same number, computed by hand.
+            if ((!Number.isFinite(x) || !Number.isFinite(y)) && Number.isFinite(native.pageX) && Number.isFinite(native.pageY)) {
+              const layer = tapLayerRef.current;
+              if (layer?.measureInWindow) {
+                layer.measureInWindow((wx: number, wy: number) => {
+                  const p = projection.toLatLng!(native.pageX! - wx, native.pageY! - wy);
+                  if (Number.isFinite(p.lat) && Number.isFinite(p.lng)) onPress(p);
+                });
+                return;
+              }
+            }
+            if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+            const px = x as number;
+            const py = y as number;
+            const p = projection.toLatLng!(px, py);
+            if (Number.isFinite(p.lat) && Number.isFinite(p.lng)) onPress(p);
           }}
           accessibilityLabel="Tap to place a point"
           style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: height }}

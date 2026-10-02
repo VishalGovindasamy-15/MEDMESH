@@ -41,14 +41,39 @@ export function DistrictField({
   /** Shown in the button when nothing is selected. */
   placeholder = 'Select district',
   disabled,
+  hideAll = false,
+  allowClear = false,
+  showCount = true,
+  countUnit,
 }: {
   districts: PickerDistrict[];
   value: number | null;
-  onChange: (id: number) => void;
+  onChange: (id: number | null) => void;
   label?: string;
   hint?: string;
   placeholder?: string;
   disabled?: boolean;
+  /**
+   * Jurisdiction fields pass this: a dispatcher is scoped to one district, a
+   * vehicle is based in one, and "All districts" in those forms is an option
+   * that means nothing. Filter fields leave it off and get the row, which for
+   * them is the most-used choice on the list.
+   */
+  hideAll?: boolean;
+  /**
+   * Filters also pass this: picking "All districts" has to be able to clear
+   * the field, so the null from the picker is forwarded instead of swallowed.
+   * Forms leave it off, where an accidental All tap keeps what was selected.
+   */
+  allowClear?: boolean;
+  /**
+   * Callers whose districts carry no meaningful count (the fleet edit modal
+   * has the district list but not the fleet) pass false and the subtitle line
+   * is dropped rather than printing "0 units" as though it knew something.
+   */
+  showCount?: boolean;
+  /** Noun for the per-district count when it is not counting facilities. */
+  countUnit?: string;
 }) {
   const { t } = useTheme();
   const [open, setOpen] = useState(false);
@@ -91,10 +116,16 @@ export function DistrictField({
               operator picking a district usually wants one that has something
               in it. */}
           {chosen ? (
-            <Small muted style={{ fontSize: 11 }}>
-              {chosen.facilities} facilit{chosen.facilities === 1 ? 'y' : 'ies'}
-              {chosen.headquarters ? ` · HQ ${chosen.headquarters}` : ''}
-            </Small>
+            showCount || chosen.headquarters ? (
+              <Small muted style={{ fontSize: 11 }}>
+                {showCount
+                  ? countUnit
+                    ? `${chosen.facilities} ${countUnit}`
+                    : `${chosen.facilities} facilit${chosen.facilities === 1 ? 'y' : 'ies'}`
+                  : ''}
+                {chosen.headquarters ? `${showCount ? ' · ' : ''}HQ ${chosen.headquarters}` : ''}
+              </Small>
+            ) : null
           ) : (
             <Small muted style={{ fontSize: 11 }}>
               {districts.length} districts
@@ -108,11 +139,13 @@ export function DistrictField({
         <DistrictPicker
           districts={districts}
           value={value}
+          hideAll={hideAll}
           onPick={(id) => {
-            // "All districts" is a filter concept, not a jurisdiction. A caller
-            // that maps a field to a single value ignores the null and keeps
-            // what it had, which is the safe reading of an accidental tap.
-            if (id !== null) onChange(id);
+            // "All districts" is a filter concept, not a jurisdiction. A form
+            // field ignores the null and keeps what it had — the safe reading
+            // of an accidental tap. A filter field (allowClear) forwards it,
+            // because clearing the filter is the whole point of that row.
+            if (id !== null || allowClear) onChange(id);
             setOpen(false);
           }}
           onClose={() => setOpen(false)}
@@ -146,6 +179,9 @@ export function FacilityPicker({
   title = 'Choose a facility',
   /** Rendered above the list — a district filter for long lists. */
   scopeToDistrictId,
+  districtField = false,
+  clearLabel,
+  onClear,
 }: {
   facilities: PickerFacility[];
   districts: PickerDistrict[];
@@ -154,6 +190,21 @@ export function FacilityPicker({
   onClose: () => void;
   title?: string;
   scopeToDistrictId?: number | null;
+  /**
+   * Render the searchable DistrictField above the chip row.
+   *
+   * The chips below are the eight districts with the most facilities — a
+   * shortcut, and a fair one, but a shortcut is not a control: with chips
+   * alone, thirty of the thirty-eight districts were reachable only by typing
+   * their name into the facility search, which nobody discovers by looking.
+   * Callers that pass this get the full picker; the chips stay as the
+   * one-tap path for the common case.
+   */
+  districtField?: boolean;
+  /** Label for an optional "none of these" first row, e.g. "No vehicle". */
+  clearLabel?: string;
+  /** Handler for that row. When absent, the row is not rendered. */
+  onClear?: () => void;
 }) {
   const { t } = useTheme();
   const [query, setQuery] = useState('');
@@ -244,6 +295,19 @@ export function FacilityPicker({
         />
       </View>
 
+      {districtField && districts.length > 8 ? (
+        <View style={{ paddingHorizontal: space.lg, paddingBottom: space.sm }}>
+          <DistrictField
+            districts={districts}
+            value={districtOnly}
+            onChange={(id) => setDistrictOnly((prev) => (prev === id ? null : id))}
+            label="District"
+            hint="optional filter — pick again to clear"
+            placeholder="All districts"
+          />
+        </View>
+      ) : null}
+
       {districtChips.length > 1 ? (
         <ScrollView
           horizontal
@@ -293,6 +357,26 @@ export function FacilityPicker({
       ) : null}
 
       <ScrollView style={{ maxHeight: 340 }} keyboardShouldPersistTaps="handled">
+        {clearLabel && onClear ? (
+          <Pressable
+            onPress={onClear}
+            accessibilityRole="button"
+            style={({ pressed }) => ({
+              flexDirection: 'row',
+              alignItems: 'center',
+              gap: space.md,
+              paddingHorizontal: space.lg,
+              paddingVertical: space.sm,
+              borderTopWidth: StyleSheet.hairlineWidth,
+              borderTopColor: t.line.subtle,
+              backgroundColor: value === null ? t.accent.soft : 'transparent',
+              opacity: pressed ? 0.75 : 1,
+            })}
+          >
+            <Icon name="x" size={15} color={value === null ? t.accent.base : t.fg.faint} />
+            <Body style={{ flex: 1, fontSize: 13.5, fontWeight: '600' }}>{clearLabel}</Body>
+          </Pressable>
+        ) : null}
         {shown.map((f) => {
           const selected = f.id === value;
           return (
@@ -428,8 +512,137 @@ export function FacilityField({
             onClose={() => setOpen(false)}
             title={title ?? label}
             scopeToDistrictId={districtFilter}
+            districtField
           />
         </>
+      ) : null}
+    </Stack>
+  );
+}
+
+/* ------------------------------------------------------------------ vehicle */
+
+export interface PickerVehicle {
+  id: number;
+  call_sign: string;
+  registration: string;
+  capability_label?: string | null;
+  status_label?: string | null;
+  base_district_id?: number | null;
+  driver?: { full_name: string } | null;
+}
+
+/**
+ * Vehicle chooser, same shape as the other two fields.
+ *
+ * The fleet runs to sixty-six units statewide. The account forms used to render
+ * them as a horizontally scrolling segmented control, which has the same defect
+ * the district rows had — the vehicle you want is a swipe-scroll away and there
+ * is no search — and one more: a scroll row of sixty-six pills on a phone is
+ * where mis-taps live. Reuses {@link FacilityPicker}'s list machinery (search,
+ * district filter, stated cap) because a vehicle row and a facility row are the
+ * same thing to a chooser: a name, a subtitle, a district.
+ */
+export function VehicleField({
+  vehicles,
+  districts,
+  value,
+  onChange,
+  label = 'Vehicle',
+  placeholder = 'Select vehicle',
+  clearLabel,
+  title,
+}: {
+  vehicles: PickerVehicle[];
+  districts: PickerDistrict[];
+  /** Null means "no vehicle linked". */
+  value: number | null;
+  /** Called with null for the clear row, otherwise the picked vehicle id. */
+  onChange: (id: number | null) => void;
+  label?: string;
+  placeholder?: string;
+  /** When set, the list gets a first row that unlinks, e.g. "No vehicle". */
+  clearLabel?: string;
+  title?: string;
+}) {
+  const { t } = useTheme();
+  const [open, setOpen] = useState(false);
+
+  const rows = useMemo<PickerFacility[]>(
+    () =>
+      vehicles.map((v) => ({
+        id: v.id,
+        name: v.call_sign,
+        short_name: v.registration,
+        district_id: v.base_district_id ?? 0,
+        district_name: districts.find((d) => d.id === v.base_district_id)?.name ?? null,
+        type_label: [v.capability_label, v.driver?.full_name ? `crew ${v.driver.full_name}` : null]
+          .filter(Boolean)
+          .join(' · '),
+      })),
+    [vehicles, districts],
+  );
+
+  const chosen = vehicles.find((v) => v.id === value) ?? null;
+  const chosenDistrict = districts.find((d) => d.id === chosen?.base_district_id)?.name ?? '';
+
+  return (
+    <Stack gap="xs">
+      <Label>{label}</Label>
+
+      <Pressable
+        onPress={() => setOpen((v) => !v)}
+        accessibilityRole="button"
+        accessibilityState={{ expanded: open }}
+        style={({ pressed }) => ({
+          flexDirection: 'row',
+          alignItems: 'center',
+          gap: space.sm,
+          paddingHorizontal: space.md,
+          paddingVertical: 10,
+          borderRadius: radius.md,
+          borderWidth: StyleSheet.hairlineWidth,
+          borderColor: open ? t.accent.base : t.line.base,
+          backgroundColor: t.bg.surface,
+          opacity: pressed ? 0.8 : 1,
+        })}
+      >
+        <Icon name="ambulance" size={15} color={chosen ? t.accent.base : t.fg.faint} />
+        <Stack gap="xxs" style={{ flex: 1, minWidth: 0 }}>
+          <Body style={{ fontSize: 13.5, fontWeight: '600', color: chosen ? t.fg.strong : t.fg.muted }} numberOfLines={1}>
+            {chosen ? chosen.call_sign : placeholder}
+          </Body>
+          <Small muted style={{ fontSize: 11 }} numberOfLines={1}>
+            {chosen
+              ? [chosen.registration, chosen.capability_label, chosenDistrict].filter(Boolean).join(' · ')
+              : `${vehicles.length} vehicles`}
+          </Small>
+        </Stack>
+        <Icon name={open ? 'chevronUp' : 'chevronDown'} size={15} color={t.fg.faint} />
+      </Pressable>
+
+      {open ? (
+        <FacilityPicker
+          facilities={rows}
+          districts={districts}
+          value={value}
+          onPick={(id) => {
+            onChange(id);
+            setOpen(false);
+          }}
+          onClose={() => setOpen(false)}
+          title={title ?? label}
+          districtField
+          clearLabel={clearLabel}
+          onClear={
+            clearLabel
+              ? () => {
+                  onChange(null);
+                  setOpen(false);
+                }
+              : undefined
+          }
+        />
       ) : null}
     </Stack>
   );

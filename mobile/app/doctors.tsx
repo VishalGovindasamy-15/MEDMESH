@@ -28,6 +28,8 @@ import {
 import { Icon } from '../src/ui/Icon';
 import { AppShell } from '../src/ui/Shell';
 import { useResponsive } from '../src/ui/useResponsive';
+import { DistrictField } from '../src/components/Selectors';
+import type { PickerDistrict } from '../src/components/DistrictPicker';
 
 interface SpecialtyOption {
   key: string;
@@ -143,6 +145,26 @@ export default function DoctorsScreen() {
     });
   }, [doctors, specialty, districtId, typeFilter, query]);
 
+  // #7: the district control has to say what is behind each option. "All
+  // districts" with the roster total, and a clinician count per district —
+  // a dispatcher filtering at 2am wants to know which districts have anybody
+  // on duty before they pick one.
+  const pickerDistricts = useMemo<PickerDistrict[]>(() => {
+    const perDistrict = new Map<number, number>();
+    for (const d of doctors ?? []) {
+      const id = d.district?.id;
+      if (id == null) continue;
+      perDistrict.set(id, (perDistrict.get(id) ?? 0) + 1);
+    }
+    return districts.map((x) => ({
+      id: x.id,
+      name: x.name,
+      name_ta: x.name_ta,
+      facilities: perDistrict.get(x.id) ?? 0,
+      countUnit: 'clinicians',
+    }));
+  }, [districts, doctors]);
+
   // Group by facility — a dispatcher asks "who is at this hospital tonight",
   // not "give me an alphabetical list of cardiologists".
   const grouped = useMemo(() => {
@@ -228,16 +250,14 @@ export default function DoctorsScreen() {
               />
             </Stack>
             <Stack gap="sm" style={{ flex: 1, minWidth: 220 }}>
-              <Label>District</Label>
-              <Segmented
-                options={[
-                  { value: 'all', label: 'All' },
-                  ...districts.map((d) => ({ value: String(d.id), label: d.name })),
-                ]}
-                value={districtId}
-                onChange={setDistrictId}
-                size="sm"
-                scroll
+              <DistrictField
+                districts={pickerDistricts}
+                value={districtId === 'all' ? null : Number(districtId)}
+                onChange={(id) => setDistrictId(id == null ? 'all' : String(id))}
+                countUnit="clinicians"
+                label="District"
+                placeholder={`All districts — ${doctors?.length ?? 0} ${onDutyOnly ? 'on duty' : 'clinicians'}`}
+                allowClear
               />
             </Stack>
           </Row>

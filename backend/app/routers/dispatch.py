@@ -19,7 +19,7 @@ import json
 from datetime import timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status as http_status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..config import settings
@@ -1420,7 +1420,54 @@ def crew_assignment(user: CurrentUser, db: Session = Depends(get_db)):
         .limit(1)
     ).scalar_one_or_none()
     if incident is None:
-        return {"assignment": None, "ambulance": _ambulance_out(ambulance, db=db), "message": "Standing by"}
+        # Standing by — with a receipt.
+        #
+        # A driver who hands over and then refreshes the app (or whose phone
+        # was killed at a hospital gate) lands here. Without the last trip on
+        # the payload the screen says only "Standing by", and the driver has
+        # no way to confirm the handover they just performed was recorded —
+        # which is exactly the moment they need to know, because an unrecorded
+        # handover means the ward never accepted the patient on the system.
+        #
+        # Most recent HANDED_OVER/CLOSED trip for this vehicle within the last
+        # six hours. CANCELLED is excluded: a cancelled job was never a trip,
+        # and showing one as "your last handover" would be a lie. The window
+        # keeps yesterday's runs off a screen that is about right now.
+        #
+        # A trip closed straight from AT_HOSPITAL never passes through
+        # handover, so its handed_over_at is null and closed_at is the stamp
+        # that matters — the window and the ordering read whichever exists.
+        finished_at = func.coalesce(Incident.handed_over_at, Incident.closed_at)
+        window_start = utcnow() - timedelta(hours=6)
+        last = db.execute(
+            select(Incident)
+            .where(
+                Incident.assigned_ambulance_id == ambulance.id,
+                Incident.status.in_((IncidentStatus.HANDED_OVER, IncidentStatus.CLOSED)),
+                finished_at.is_not(None),
+                finished_at >= window_start,
+            )
+            .order_by(finished_at.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+        last_trip = None
+        if last is not None:
+            hospital = db.get(Hospital, last.assigned_hospital_id) if last.assigned_hospital_id else None
+            stamp = last.handed_over_at or last.closed_at
+            last_trip = {
+                "id": last.id,
+                "reference": last.reference,
+                "status": last.status.value,
+                "status_label": lifecycle.STATUS_LABELS.get(last.status, last.status.value),
+                "handed_over_at": stamp.isoformat() if stamp else None,
+                "hospital_short_name": hospital.short_name if hospital else None,
+            }
+        return {
+            "assignment": None,
+            "ambulance": _ambulance_out(ambulance, db=db),
+            "message": "Standing by",
+            "last_trip": last_trip,
+        }
     return _assignment_payload(db, incident, ambulance)
 
 

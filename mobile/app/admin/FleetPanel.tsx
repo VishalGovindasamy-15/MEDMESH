@@ -45,6 +45,8 @@ import {
   TextField,
 } from '../../src/ui';
 import { Icon } from '../../src/ui/Icon';
+import { DistrictField } from '../../src/components/Selectors';
+import type { PickerDistrict } from '../../src/components/DistrictPicker';
 
 const CAPABILITIES: { value: string; label: string; short: string }[] = [
   { value: 'bls', label: 'BLS · basic life support', short: 'BLS' },
@@ -91,7 +93,11 @@ function KV({
 }) {
   const { t } = useTheme();
   return (
-    <View style={{ minWidth: 150 }}>
+    /* minWidth keeps the label/value pairs from collapsing to a sliver beside
+       each other, but the value itself must be allowed to shrink — an operator
+       name is longer than 150px and RN-web will not shrink a child below its
+       content unless flexShrink says so. */
+    <View style={{ minWidth: 150, flexShrink: 1 }}>
       <Small muted style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: 0.4 }}>
         {label}
       </Small>
@@ -154,6 +160,24 @@ export function FleetPanel({
     (id?: number | null) => districts.find((d) => d.id === id)?.name ?? '—',
     [districts],
   );
+
+  // The shared picker wants a count per district; on this screen the count that
+  // matters is how many units are based there, which also tells a fleet officer
+  // at a glance which districts are thin.
+  const pickerDistricts = useMemo<PickerDistrict[]>(() => {
+    const perDistrict = new Map<number, number>();
+    for (const a of fleet ?? []) {
+      if (a.base_district_id == null) continue;
+      perDistrict.set(a.base_district_id, (perDistrict.get(a.base_district_id) ?? 0) + 1);
+    }
+    return districts.map((d) => ({
+      id: d.id,
+      name: d.name,
+      name_ta: d.name_ta,
+      facilities: perDistrict.get(d.id) ?? 0,
+      countUnit: 'units',
+    }));
+  }, [districts, fleet]);
 
   const units = useMemo(() => {
     const all = fleet ?? [];
@@ -348,13 +372,16 @@ export function FleetPanel({
               </Row>
 
               <Stack gap="sm">
-                <Label>Base district</Label>
-                <Segmented
-                  size="sm"
-                  scroll
-                  value={form.base_district_id}
-                  onChange={(v) => setForm((f) => ({ ...f, base_district_id: v }))}
-                  options={districts.map((d) => ({ value: String(d.id), label: d.name }))}
+                {/* #9: a vehicle must be based somewhere, so this picker has no
+                    "All districts" row — unlike the filter above. */}
+                <DistrictField
+                  districts={pickerDistricts}
+                  value={form.base_district_id ? Number(form.base_district_id) : null}
+                  onChange={(id) => setForm((f) => ({ ...f, base_district_id: id == null ? '' : String(id) }))}
+                  countUnit="units"
+                  label="Base district"
+                  placeholder="Select district"
+                  hideAll
                 />
                 <Small muted>
                   Determines which district&apos;s incidents this unit answers first. It is not a hard
@@ -466,19 +493,18 @@ export function FleetPanel({
             </View>
           </Row>
 
-          <Stack gap="sm">
-            <Label>Base district</Label>
-            <Segmented
-              size="sm"
-              scroll
-              value={districtFilter}
-              onChange={setDistrictFilter}
-              options={[
-                { value: 'all', label: 'All districts' },
-                ...districts.map((d) => ({ value: String(d.id), label: d.name })),
-              ]}
-            />
-          </Stack>
+          {/* #10: 38 districts in a segmented control is not a filter, it is a
+              scroll bar with extra steps. The filter keeps an "All districts"
+              row — the vehicle form below deliberately does not. */}
+          <DistrictField
+            districts={pickerDistricts}
+            value={districtFilter === 'all' ? null : Number(districtFilter)}
+            onChange={(id) => setDistrictFilter(id == null ? 'all' : String(id))}
+            countUnit="units"
+            label="Base district"
+            placeholder="All districts"
+            allowClear
+          />
 
           {units.length === 0 ? (
             <EmptyState
@@ -608,7 +634,10 @@ function UnitRow({
           />
           {!unit.driver ? <Pill label="no crew" tone="warm" compact /> : null}
         </Row>
-        <Row gap="xs" align="center" wrap>
+        {/* flexBasis: the three buttons need ~460px together; giving the group
+            a 240px basis lets it sit beside the call sign on a tablet and drop
+            under it on a phone instead of forcing the row wider than the card. */}
+        <Row gap="xs" align="center" wrap style={{ flexBasis: 240, flexGrow: 1 }}>
           <Button size="sm" variant="ghost" label={picking ? 'Cancel' : unit.driver ? 'Change driver' : 'Link driver'} onPress={() => setPicking((v) => !v)} />
           <Button
             size="sm"
@@ -709,6 +738,21 @@ function EditVehicle({
   });
   const [busy, setBusy] = useState(false);
 
+  // The modal only has the district list, not the fleet, so the picker rows
+  // here carry no per-district unit counts — the name and the Tamil name are
+  // what a re-basing decision is actually made on.
+  const pickerDistricts = useMemo<PickerDistrict[]>(
+    () =>
+      districts.map((d) => ({
+        id: d.id,
+        name: d.name,
+        name_ta: d.name_ta,
+        facilities: 0,
+        countUnit: 'units',
+      })),
+    [districts],
+  );
+
   const save = async () => {
     if (!token) return;
     setBusy(true);
@@ -789,13 +833,18 @@ function EditVehicle({
             />
 
             <Stack gap="sm">
-              <Label>Base district</Label>
-              <Segmented
-                size="sm"
-                scroll
-                value={form.base_district_id}
-                onChange={(v) => setForm((f) => ({ ...f, base_district_id: v }))}
-                options={districts.map((d) => ({ value: String(d.id), label: d.name }))}
+              {/* #11: same picker as the create form — re-basing a unit is the
+                  one edit fleet offices actually make, and scrolling 38
+                  segmented buttons to do it was the worst place for it. */}
+              <DistrictField
+                districts={pickerDistricts}
+                value={form.base_district_id ? Number(form.base_district_id) : null}
+                onChange={(id) => setForm((f) => ({ ...f, base_district_id: id == null ? '' : String(id) }))}
+                countUnit="units"
+                showCount={false}
+                label="Base district"
+                placeholder="Select district"
+                hideAll
               />
             </Stack>
 

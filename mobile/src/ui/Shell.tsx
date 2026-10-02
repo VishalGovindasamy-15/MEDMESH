@@ -250,7 +250,11 @@ export function PageHeader({
           </View>
         </View>
 
-        <Row gap="sm" align="center">
+        {/* wrap + shrink: header actions are buttons with real labels ("Report
+            an inaccuracy", "Refresh now"); on a 360px phone the title column
+            and this row cannot share one line, and without wrap the row kept
+            its intrinsic width and stretched the header past the viewport. */}
+        <Row gap="sm" align="center" wrap style={{ flexShrink: 1 }}>
           {actions}
           {showThemeToggle ? (
             <Pressable

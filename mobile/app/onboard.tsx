@@ -28,6 +28,7 @@ import {
   Title,
 } from '../src/ui';
 import { Icon } from '../src/ui/Icon';
+import { DistrictField, type PickerDistrict } from '../src/components/Selectors';
 import { AppShell } from '../src/ui/Shell';
 import { useResponsive } from '../src/ui/useResponsive';
 
@@ -133,6 +134,19 @@ export default function Onboard() {
       }));
     },
     [],
+  );
+
+  // The shared picker wants a facility count per district; this endpoint calls
+  // it `hospital_count`. Mapped here rather than widening either type.
+  const pickerDistricts = useMemo<PickerDistrict[]>(
+    () =>
+      districts.map((d) => ({
+        id: d.id,
+        name: d.name,
+        name_ta: d.name_ta,
+        facilities: d.hospital_count ?? 0,
+      })),
+    [districts],
   );
 
   const readiness = useMemo(() => {
@@ -279,7 +293,10 @@ export default function Onboard() {
     >
       <ScrollView contentContainerStyle={{ paddingBottom: space.xxl, gap: space.lg }}>
         <Card>
-          <Row justify="space-between" align="center" wrap gap={space.md}>
+          {/* align flex-start, not center: on a wrapping row, the default
+              stretch/center alignment lets the stepper keep its full intrinsic
+              width on a 360px phone instead of wrapping to a second line. */}
+          <Row justify="space-between" align="flex-start" wrap gap={space.md}>
             <Stack gap={2} style={{ flex: 1, minWidth: 240 }}>
               <Heading>Register a facility with MedMesh</Heading>
               <Small muted>
@@ -288,7 +305,7 @@ export default function Onboard() {
                 published until a district officer has verified the facility.
               </Small>
             </Stack>
-            <Row gap={space.sm}>
+            <Row gap={space.sm} wrap style={{ flexShrink: 1 }}>
               {STEPS.map((label, i) => (
                 <Pill
                   key={label}
@@ -364,22 +381,23 @@ export default function Onboard() {
                 />
               </Stack>
 
+              {/* Thirty-eight district buttons was the worst of the chip rows:
+                  a first-time applicant on a phone, on a form that already asks
+                  for a lot, scrolling a wall of buttons to find their own
+                  district. The shared picker searches, and choosing one still
+                  fills in the district centre as the starting coordinate. */}
               <Stack gap={6}>
-                <Label>District</Label>
-                <Row gap={space.sm} wrap>
-                  {districts.map((d) => {
-                    const active = String(d.id) === form.district_id;
-                    return (
-                      <Button
-                        key={d.id}
-                        label={`${d.name}${d.name_ta ? ` · ${d.name_ta}` : ''}`}
-                        size="sm"
-                        variant={active ? 'primary' : 'secondary'}
-                        onPress={() => applyDistrictCentre(d)}
-                      />
-                    );
-                  })}
-                </Row>
+                <DistrictField
+                  districts={pickerDistricts}
+                  value={form.district_id ? Number(form.district_id) : null}
+                  onChange={(id) => {
+                    const d = districts.find((x) => x.id === id);
+                    if (d) applyDistrictCentre(d);
+                  }}
+                  label="District"
+                  placeholder="Select district"
+                  hideAll
+                />
                 <Small muted>
                   Choosing a district fills in its centre as a starting point. Ambulance routing uses the
                   coordinates, so move them if the facility is well outside the town.

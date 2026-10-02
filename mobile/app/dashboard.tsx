@@ -718,10 +718,15 @@ export default function HospitalDashboard() {
 
         <Row gap="lg" align="flex-start" style={{ flexWrap: 'wrap' }}>
           {/* Quick update keypad ------------------------------------------- */}
-          <Stack gap="lg" style={{ flex: 2, minWidth: isDesktop ? 480 : '100%' }}>
+          {/* minWidth:'100%' on a phone means "never share a line", which is
+              right, but it also means "never shrink below the container" when
+              the row has padding — 480/320 minimums inside a 360px viewport
+              were the dashboard's overflow. Basis 100% + min 0 stacks the
+              columns on a phone and lets them fill side by side on a desktop. */}
+          <Stack gap="lg" style={{ flex: 2, minWidth: isDesktop ? 480 : 0, flexBasis: isDesktop ? 0 : '100%' }}>
             <Card style={{ gap: space.lg }}>
               <Row justify="space-between" align="center" gap="sm" style={{ flexWrap: 'wrap' }}>
-                <Stack gap="xxs">
+                <Stack gap="xxs" style={{ flexShrink: 1 }}>
                   <Heading>Quick update</Heading>
                   <Small muted style={{ fontSize: 12 }}>
                     One tap per change. Published to dispatch and the public directory instantly.
@@ -847,7 +852,7 @@ export default function HospitalDashboard() {
             */}
             <Card style={{ gap: space.md }}>
               <Row justify="space-between" align="center" gap="sm" style={{ flexWrap: 'wrap' }}>
-                <Stack gap="xxs">
+                <Stack gap="xxs" style={{ flexShrink: 1 }}>
                   <Heading>Clinician roster</Heading>
                   <Small muted style={{ fontSize: 12 }}>
                     On-duty status drives the dispatcher's specialist view and the public directory.
@@ -1033,7 +1038,7 @@ export default function HospitalDashboard() {
           </Stack>
 
           {/* Right rail ---------------------------------------------------- */}
-          <Stack gap="lg" style={{ flex: 1, minWidth: isDesktop ? 320 : '100%' }}>
+          <Stack gap="lg" style={{ flex: 1, minWidth: isDesktop ? 320 : 0, flexBasis: isDesktop ? 0 : '100%' }}>
             <Card style={{ gap: space.md }}>
               <SectionHeader label="Published figures" />
               <Row gap="lg" wrap>
@@ -1148,12 +1153,15 @@ export default function HospitalDashboard() {
               <SectionHeader label="Recent submissions" />
               <Stack gap="sm">
                 {detail.history.slice(-6).reverse().map((h, i) => (
-                  <Row key={`${h.t}-${i}`} justify="space-between" align="center" gap="sm">
-                    <Stack gap="xxs">
+                  <Row key={`${h.t}-${i}`} justify="space-between" align="center" gap="sm" wrap>
+                    {/* shrink + wrap: the source/congestion line is text that
+                        must give way before the figures do — the row was the
+                        widest element in the right rail at 360px. */}
+                    <Stack gap="xxs" style={{ flexShrink: 1 }}>
                       <Num size={11.5} color={t.fg.muted}>
                         {new Date(h.t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })}
                       </Num>
-                      <Small muted style={{ fontSize: 10.5 }}>
+                      <Small muted style={{ fontSize: 10.5 }} numberOfLines={2}>
                         {h.source} · {h.congestion}
                       </Small>
                     </Stack>

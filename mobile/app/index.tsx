@@ -5,7 +5,8 @@ import { Pressable, RefreshControl, ScrollView, StyleSheet, View } from 'react-n
 import { api } from '../src/api/client';
 import type { District, Facility } from '../src/api/types';
 import { FacilityRow } from '../src/components/FacilityRow';
-import { DistrictPicker } from '../src/components/DistrictPicker';
+import { DistrictField } from '../src/components/Selectors';
+import type { PickerDistrict } from '../src/components/DistrictPicker';
 import { MapSurface } from '../src/components/MapSurface';
 import { toMapPoints } from '../src/components/mapTypes';
 import { VoiceSearchField } from '../src/components/VoiceSearch';
@@ -76,7 +77,6 @@ export default function DirectoryScreen() {
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState<FilterKey>('all');
   const [districtId, setDistrictId] = useState<number | null>(null);
-  const [districtPickerOpen, setDistrictPickerOpen] = useState(false);
   // #22: on a phone the map used to open first and full-width, pushing the
   // search box, the filters and the first hospital below the fold — the reader
   // who came for "where can I go right now" got scenery. Desktop keeps it open;
@@ -281,6 +281,21 @@ export default function DirectoryScreen() {
 
   const selectedDistrict = districtId ? districts.find((d) => d.id === districtId) : null;
 
+  // Facility count per district, so the picker rows answer "is there anything
+  // there" before the reader commits to a district.
+  const pickerDistricts = useMemo<PickerDistrict[]>(() => {
+    const perDistrict = new Map<number, number>();
+    for (const f of merged) {
+      perDistrict.set(f.district_id, (perDistrict.get(f.district_id) ?? 0) + 1);
+    }
+    return districts.map((d) => ({
+      id: d.id,
+      name: d.name,
+      name_ta: d.name_ta,
+      facilities: perDistrict.get(d.id) ?? 0,
+    }));
+  }, [districts, merged]);
+
   const mapWidth = isPhone ? width - 24 : isDesktop ? 620 : width - 72;
 
   return (
@@ -472,56 +487,20 @@ export default function DirectoryScreen() {
           {/*
             District chooser.
 
-            This was a single horizontal `Segmented` carrying all 38 districts,
-            which is a forty-item scroll on a phone: reaching Kanniyakumari meant
-            dragging past thirty-nine targets, and the only affordance for
-            finding one was knowing where it sat in the list. The first six
-            districts in the population order get a chip; the rest live behind a
-            searchable picker that shows how many facilities each has, so the
-            choice can be made by name or by size.
+            This used to be a horizontal `Segmented` carrying all 38 districts,
+            then a five-chip shortcut plus a picker button beside it — two
+            controls for one value, and the chips silently lied about "All"
+            whenever a district outside the first five was chosen. One field
+            now: searchable, every district, with the facility count per row.
           */}
-          <Stack gap="sm">
-            <Row gap="sm" align="center" justify="space-between">
-              <Segmented
-                options={[
-                  { value: 'all', label: tr('home.districts') },
-                  ...districts.slice(0, 5).map((d) => ({ value: String(d.id), label: d.name })),
-                ]}
-                value={
-                  districtId === null || districts.findIndex((d) => d.id === districtId) >= 5
-                    ? 'all'
-                    : String(districtId)
-                }
-                onChange={(v) => setDistrictId(v === 'all' ? null : Number(v))}
-                size="sm"
-                scroll
-              />
-              <Button
-                size="sm"
-                icon="search"
-                label={
-                  !selectedDistrict || districts.findIndex((d) => d.id === districtId) >= 5
-                    ? `All ${districts.length} districts`
-                    : selectedDistrict.name
-                }
-                onPress={() => setDistrictPickerOpen(true)}
-              />
-            </Row>
-            {districtPickerOpen ? (
-              <DistrictPicker
-                districts={districts.map((d) => ({
-                  ...d,
-                  facilities: merged.filter((f) => f.district_id === d.id).length,
-                }))}
-                value={districtId}
-                onPick={(id) => {
-                  setDistrictId(id);
-                  setDistrictPickerOpen(false);
-                }}
-                onClose={() => setDistrictPickerOpen(false)}
-              />
-            ) : null}
-          </Stack>
+          <DistrictField
+            districts={pickerDistricts}
+            value={districtId}
+            onChange={(id) => setDistrictId(id)}
+            label={tr('home.districts')}
+            placeholder={`All ${districts.length} districts`}
+            allowClear
+          />
         </Stack>
 
         {/* Map ---------------------------------------------------------- */}

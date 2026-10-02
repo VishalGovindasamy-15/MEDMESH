@@ -483,6 +483,21 @@ export interface CrewAssignment {
    *  is what tells those apart, because only one of them resolves on its own. */
   message?: string;
   action_required?: string;
+  /**
+   * Receipt for the last completed handover, when there is no active trip.
+   * A driver who refreshed the app after handing over used to land on a bare
+   * "Standing by" and had no way to confirm the handover had actually been
+   * recorded — the screen now shows the trip they just closed, its reference
+   * and the receiving hospital.
+   */
+  last_trip?: {
+    id: number;
+    reference: string;
+    status: string;
+    status_label: string;
+    handed_over_at: string | null;
+    hospital_short_name: string | null;
+  } | null;
 }
 
 export interface District {

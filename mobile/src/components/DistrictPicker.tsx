@@ -23,6 +23,13 @@ export interface PickerDistrict {
   name_ta?: string | null;
   headquarters?: string | null;
   facilities: number;
+  /**
+   * What the `facilities` count is counting, when it is not facilities.
+   * The doctors directory passes its own per-district clinician counts through
+   * the same field; the row then says "183 clinicians" instead of "183
+   * facilities", which would be simply wrong on that screen.
+   */
+  countUnit?: string | null;
 }
 
 export function DistrictPicker({
@@ -30,11 +37,22 @@ export function DistrictPicker({
   value,
   onPick,
   onClose,
+  hideAll = false,
 }: {
   districts: PickerDistrict[];
   value: number | null;
   onPick: (id: number | null) => void;
   onClose: () => void;
+  /**
+   * Suppress the "All districts" row.
+   *
+   * "All districts" is a filter concept. A jurisdiction field — the district a
+   * dispatcher is scoped to, the base district of a vehicle, the district of a
+   * facility being onboarded — has no meaningful "all", and offering one there
+   * is an option that silently does nothing when tapped (the field maps to a
+   * single id). Filters keep the row; forms lose it.
+   */
+  hideAll?: boolean;
 }) {
   const { t } = useTheme();
   const [query, setQuery] = useState('');
@@ -92,26 +110,28 @@ export function DistrictPicker({
       </View>
 
       <ScrollView style={{ maxHeight: 320 }} keyboardShouldPersistTaps="handled">
-        <Pressable
-          onPress={() => onPick(null)}
-          style={({ pressed }) => ({
-            flexDirection: 'row',
-            alignItems: 'center',
-            gap: space.md,
-            paddingHorizontal: space.lg,
-            paddingVertical: space.sm,
-            borderTopWidth: StyleSheet.hairlineWidth,
-            borderTopColor: t.line.subtle,
-            backgroundColor: value === null ? t.accent.soft : 'transparent',
-            opacity: pressed ? 0.75 : 1,
-          })}
-        >
-          <Icon name="globe" size={15} color={value === null ? t.accent.base : t.fg.faint} />
-          <Body style={{ flex: 1, fontSize: 13.5, fontWeight: '600' }}>All districts</Body>
-          <Num size={12} color={t.fg.muted}>
-            {districts.reduce((sum, d) => sum + d.facilities, 0)}
-          </Num>
-        </Pressable>
+        {hideAll ? null : (
+          <Pressable
+            onPress={() => onPick(null)}
+            style={({ pressed }) => ({
+              flexDirection: 'row',
+              alignItems: 'center',
+              gap: space.md,
+              paddingHorizontal: space.lg,
+              paddingVertical: space.sm,
+              borderTopWidth: StyleSheet.hairlineWidth,
+              borderTopColor: t.line.subtle,
+              backgroundColor: value === null ? t.accent.soft : 'transparent',
+              opacity: pressed ? 0.75 : 1,
+            })}
+          >
+            <Icon name="globe" size={15} color={value === null ? t.accent.base : t.fg.faint} />
+            <Body style={{ flex: 1, fontSize: 13.5, fontWeight: '600' }}>All districts</Body>
+            <Num size={12} color={t.fg.muted}>
+              {districts.reduce((sum, d) => sum + d.facilities, 0)}
+            </Num>
+          </Pressable>
+        )}
 
         {rows.map((d) => {
           const selected = d.id === value;

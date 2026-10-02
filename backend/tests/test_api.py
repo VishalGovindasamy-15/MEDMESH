@@ -3414,6 +3414,79 @@ def test_a_cancelled_trip_also_releases_the_crew_screen():
         assert c.get(f"{API}/crew/assignment", headers=crew).json().get("assignment") is None
 
 
+def test_standby_payload_receipts_the_last_handover():
+    """Standing by must show the trip that was just completed.
+
+    A driver who hands over and then refreshes the app — or whose phone was
+    killed at the hospital gate — lands on the standby payload. Without a
+    receipt the screen says only "Standing by" and the driver has no way to
+    confirm the handover was recorded, which is exactly the moment they need
+    to know. The receipt is the most recent HANDED_OVER/CLOSED trip for this
+    vehicle inside a six-hour window; a cancelled job was never a trip and
+    must not be offered as one.
+    """
+    with client() as c:
+        admin = _login(c, "admin@medmesh.in", "MedMesh@2026")
+        dispatcher = _login(c, "dispatch@medmesh.in", "Dispatch@108")
+        crew = _login(c, "crew@medmesh.in", "Crew@108")
+        unit = _crew_vehicle(c, admin)
+        incident = _a_crew_incident(c, dispatcher, admin, ambulance_id=unit["id"])
+
+        # Walk the trip to handover.
+        for stage in ("en_route", "at_scene", "patient_onboard", "transporting", "at_hospital", "handed_over"):
+            moved = c.post(
+                f"{API}/incidents/{incident['id']}/status",
+                headers=crew,
+                json={"status": stage},
+            )
+            assert moved.status_code == 200, f"{stage}: {moved.text}"
+
+        standby = c.get(f"{API}/crew/assignment", headers=crew).json()
+        assert standby.get("assignment") is None
+        assert standby.get("message") == "Standing by"
+        last = standby.get("last_trip")
+        assert last is not None, "the standby payload carries no receipt for the handover just performed"
+        assert last["id"] == incident["id"]
+        assert last["reference"] == incident["reference"]
+        assert last["status"] == "handed_over"
+        assert last["status_label"] == "Handed over"
+        assert last["handed_over_at"], "the receipt has no handover time"
+        assert last["hospital_short_name"], "the receipt does not name the receiving hospital"
+
+        # A second trip, closed straight from the hospital without a handover
+        # (the lifecycle allows AT_HOSPITAL -> CLOSED for a patient the ward
+        # took informally). Such a trip has no handed_over_at, so the receipt
+        # must fall back to closed_at rather than drop the trip.
+        second = _a_crew_incident(c, dispatcher, admin, ambulance_id=unit["id"])
+        for stage in ("en_route", "at_scene", "patient_onboard", "transporting", "at_hospital"):
+            moved = c.post(
+                f"{API}/incidents/{second['id']}/status",
+                headers=crew,
+                json={"status": stage},
+            )
+            assert moved.status_code == 200, f"{stage}: {moved.text}"
+        closed = c.post(
+            f"{API}/incidents/{second['id']}/status",
+            headers=crew,
+            json={"status": "closed"},
+        )
+        assert closed.status_code == 200, closed.text
+        after = c.get(f"{API}/crew/assignment", headers=crew).json()
+        assert after["last_trip"]["id"] == second["id"], "the newer completed trip did not replace the receipt"
+        assert after["last_trip"]["status"] == "closed"
+        assert after["last_trip"]["status_label"] == "Closed"
+        assert after["last_trip"]["handed_over_at"], "a trip closed at the hospital has no receipt stamp"
+
+        # A cancelled job is not a trip and must not become the receipt.
+        third = _a_crew_incident(c, dispatcher, admin, ambulance_id=unit["id"])
+        c.post(f"{API}/incidents/{third['id']}/status", headers=crew, json={"status": "cancelled"})
+        standby2 = c.get(f"{API}/crew/assignment", headers=crew).json()
+        assert standby2.get("assignment") is None
+        assert standby2["last_trip"]["id"] == second["id"], (
+            "a cancelled job replaced the real handover as the receipt"
+        )
+
+
 # --------------------------------------------------------------------------- #
 # Doctor duty expiry
 #

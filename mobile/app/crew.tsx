@@ -6,7 +6,7 @@ import { api, ApiError } from '../src/api/client';
 import type { CrewAssignment, ShortlistCandidate } from '../src/api/types';
 import { MapSurface } from '../src/components/MapSurface';
 import type { MapPoint } from '../src/components/mapTypes';
-import { countdown, elapsed, STATUS_LABELS } from '../src/lib/format';
+import { countdown, elapsed, relativeFromIso, STATUS_LABELS } from '../src/lib/format';
 import { hasDirections, navigationUrl } from '../src/lib/maps';
 import { useAuth } from '../src/state/AuthProvider';
 import { useLive } from '../src/state/LiveProvider';
@@ -379,11 +379,15 @@ export default function CrewScreen() {
         title="Standing by"
         subtitle={data.ambulance ? `${data.ambulance.call_sign} · ${data.ambulance.capability_label}` : 'No vehicle linked'}
         maxWidth={720}
+        footerNote="Live GPS while trip screen is active. Position reporting starts when a trip is dispatched and stops at handover; nothing is tracked while you are standing by."
       >
         <Stack gap="lg">
-          <Card style={{ gap: space.md }}>
-            <Row justify="space-between" align="center">
-              <Stack gap="xxs">
+          {/* tone live: standing by is a healthy state, not an empty one. The
+              card used to render in the default neutral tone, which on this
+              design system reads the same as "nothing loaded yet". */}
+          <Card tone="live" style={{ gap: space.md }}>
+            <Row justify="space-between" align="center" wrap>
+              <Stack gap="xxs" style={{ flexShrink: 1 }}>
                 <Heading>
                   {/*
                     "No assignment" and "this account has no vehicle" look the
@@ -406,6 +410,33 @@ export default function CrewScreen() {
               <Stack gap="xxs">
                 <Stat label="Vehicle" value={data.ambulance.call_sign} sub={data.ambulance.operator_name} />
               </Stack>
+            ) : null}
+
+            {/* The handover receipt. A driver who refreshes the app after
+                handing over — or whose phone was killed at the hospital gate —
+                lands on this screen, and "Standing by" alone does not tell
+                them whether the handover they just performed was recorded.
+                The server sends the last completed trip for this vehicle
+                (six-hour window, cancelled jobs excluded); showing it turns
+                an anxious refresh into a confirmation. */}
+            {data.last_trip ? (
+              <Card tone="live" style={{ gap: space.xs }}>
+                <Row justify="space-between" align="center" gap="sm" wrap>
+                  <Stack gap={2} style={{ flexShrink: 1 }}>
+                    <Label style={{ fontSize: 10 }}>Last trip — handover recorded</Label>
+                    <Num size={15} weight="700">
+                      {data.last_trip.reference} · {data.last_trip.status_label}
+                    </Num>
+                  </Stack>
+                  <Pill label="recorded" tone="live" icon="check" compact />
+                </Row>
+                <Small muted style={{ fontSize: 11.5 }}>
+                  {data.last_trip.hospital_short_name
+                    ? `Handed over at ${data.last_trip.hospital_short_name}`
+                    : 'Handover complete'}
+                  {data.last_trip.handed_over_at ? ` · ${relativeFromIso(data.last_trip.handed_over_at)}` : ''}
+                </Small>
+              </Card>
             ) : null}
 
             {data.action_required ? (
@@ -463,9 +494,10 @@ export default function CrewScreen() {
         </Row>
       }
       footerNote={
-        hasDirections()
+        (hasDirections()
           ? 'Route geometry is resolved by Google Directions. Traffic-aware ETA to the receiving desk. Navigation opens in your own maps app.'
-          : 'Route shown is an estimated corridor for situational awareness, not turn-by-turn navigation. Set EXPO_PUBLIC_GOOGLE_MAPS_API_KEY to resolve live road routes.'
+          : 'Route shown is an estimated corridor for situational awareness, not turn-by-turn navigation. Set EXPO_PUBLIC_GOOGLE_MAPS_API_KEY to resolve live road routes.') +
+        ' Live GPS while trip screen is active — keep the app in the foreground on a trip.'
       }
       scroll={false}
     >

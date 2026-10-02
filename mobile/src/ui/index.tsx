@@ -240,10 +240,15 @@ export function Pill({
         backgroundColor: outline ? 'transparent' : c.soft,
         borderWidth: outline ? StyleSheet.hairlineWidth : 0,
         borderColor: `${c.base}66`,
+        /* RN-web defaults flexShrink to 0, so a pill with a long label (a
+           Tamil stage name, a district) forced its whole row wider than a
+           360px phone instead of letting the text ellipsize. */
+        flexShrink: 1,
       }}
     >
       {icon ? <Icon name={icon} size={11} color={c.base} strokeWidth={2} /> : null}
       <Text
+        numberOfLines={1}
         style={{
           fontSize: compact ? 10 : 11,
           lineHeight: compact ? 14 : 15,
@@ -251,6 +256,7 @@ export function Pill({
           letterSpacing: 0.3,
           color: c.base,
           textTransform: compact ? 'uppercase' : 'none',
+          flexShrink: 1,
         }}
       >
         {label}
@@ -531,7 +537,11 @@ export function Segmented<T extends string>({
 
   if (scroll) {
     return (
-      <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+      /* flexGrow/Shrink/Basis: a horizontal ScrollView inside a wrapping row
+         sizes to its content unless its basis is zero — which is how a
+         38-option segmented control pushed its parent card past the viewport
+         on a phone instead of becoming scrollable. */
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ flexGrow: 1, flexShrink: 1, flexBasis: 0 }}>
         {strip}
       </ScrollView>
     );
@@ -609,6 +619,11 @@ export function TextField({
           onBlur={() => setFocused(false)}
           style={{
             flex: 1,
+            /* A web <input> has a ~180px intrinsic minimum width that RN-web
+               does not reset, so a field in a narrow column (two coordinate
+               inputs side by side on a phone) forced its row wider than the
+               viewport. minWidth: 0 lets flex do its job. */
+            minWidth: 0,
             fontSize: 14.5,
             color: t.fg.strong,
             paddingVertical: 0,

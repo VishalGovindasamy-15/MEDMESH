@@ -25,20 +25,23 @@ import { MapSurface } from './MapSurface';
  *   was matched, ranked and ambulanced as though it were in the middle of
  *   Coimbatore city. The shortlist it produced was for a different journey.
  *
- * A 108 call-taker knows the location. This control asks them for it in the
- * order of how good the answer is:
+ * A 108 call-taker knows the location, and — this is the part the second
+ * design got wrong — knows *how* they know it. This control asks the question
+ * outright, in the order of how good the answer is:
  *
- *   1. A pasteable coordinates field. Most Indian emergency call-takers receive
- *      an AML fix on the call, and the fastest thing they can do is paste it.
- *   2. A map the operator taps to drop a pin, for a caller who can describe
- *      where they are but has no coordinates.
+ *   1. The caller gave coordinates (most Indian emergency call-takers receive
+ *      an AML fix on the call; the fastest thing they can do is paste it).
+ *   2. A pin dropped on the map, for a caller who can describe where they are.
  *   3. The device's own location, for the case where the dispatcher is the
  *      person at the scene (a supervisor responding directly).
- *   4. District centre, as an explicitly-labelled last resort — never silent.
+ *   4. District centre — approximate, and labelled approximate everywhere it
+ *      appears, never silent.
  *
- * Whatever the source, the control states the provenance and, when the fix is
- * the district centre, says so in the same visual weight as the coordinates.
- * The one outcome that must not happen is a placeholder being mistaken for a fix.
+ * The first three are marked ● EXACT and the fourth ○ APPROXIMATE on the
+ * chooser row itself, before anything is picked, and the badge travels with
+ * the value: a dispatcher who is about to dispatch to a district centre can
+ * see that fact in the same glance as the coordinates. The one outcome that
+ * must not happen is a placeholder being mistaken for a fix.
  */
 
 /**
@@ -71,6 +74,84 @@ export interface IncidentLocation {
   offsetKm: number | null;
 }
 
+/**
+ * One row of the "how do you know the location?" chooser.
+ *
+ * A row rather than a button because the row carries the exactness badge and a
+ * line of copy — the two things that stop a dispatcher tapping "district
+ * centre" believing it is a fix. The badge is ● EXACT for the three real
+ * sources and ○ APPROXIMATE for the fallback, in the warm tone, so the
+ * difference is readable at a glance and in peripheral vision.
+ */
+function SourceRow({
+  icon,
+  title,
+  subtitle,
+  exact,
+  active,
+  busy,
+  disabled,
+  onPress,
+}: {
+  icon: 'keyboard' | 'crosshair' | 'pin' | 'grid';
+  title: string;
+  subtitle: string;
+  exact: boolean;
+  active?: boolean;
+  busy?: boolean;
+  disabled?: boolean;
+  onPress: () => void;
+}) {
+  const { t } = useTheme();
+  return (
+    <Pressable
+      onPress={() => !disabled && !busy && onPress()}
+      accessibilityRole="button"
+      accessibilityState={{ disabled: !!disabled || !!busy, selected: !!active }}
+      style={({ pressed }) => ({
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: space.sm,
+        paddingVertical: 9,
+        paddingHorizontal: space.md,
+        borderRadius: radius.md,
+        borderWidth: StyleSheet.hairlineWidth,
+        borderColor: active ? t.accent.base : exact ? t.line.base : t.status.warm.base,
+        backgroundColor: active ? t.accent.soft : exact ? t.bg.surface : t.status.warm.soft,
+        opacity: disabled ? 0.5 : pressed ? 0.8 : 1,
+      })}
+    >
+      <Icon
+        name={icon}
+        size={15}
+        color={active ? t.accent.base : exact ? t.fg.muted : t.status.warm.base}
+      />
+      <Stack gap={1} style={{ flex: 1, minWidth: 0 }}>
+        <Small style={{ fontSize: 12.5, fontWeight: '600', color: t.fg.strong }} numberOfLines={1}>
+          {title}
+        </Small>
+        <Small muted style={{ fontSize: 11 }} numberOfLines={2}>
+          {subtitle}
+        </Small>
+      </Stack>
+      {busy ? (
+        <Small muted style={{ fontSize: 11 }}>…</Small>
+      ) : (
+        <Small
+          style={{
+            fontSize: 10.5,
+            fontWeight: '700',
+            letterSpacing: 0.4,
+            color: exact ? t.fg.muted : t.status.warm.base,
+          }}
+        >
+          {exact ? '● EXACT' : '○ APPROX'}
+        </Small>
+      )}
+    </Pressable>
+  );
+}
+
 export function LocationPicker({
   districts,
   districtId,
@@ -95,8 +176,6 @@ export function LocationPicker({
    * them rather than a hole an operator has to find.
    */
   const [mode, setMode] = useState<'none' | 'coordinates' | 'map'>('none');
-  const setOpen = (v: boolean) => setMode(v ? 'coordinates' : 'none');
-  const open = mode !== 'none';
   const [latText, setLatText] = useState('');
   const [lngText, setLngText] = useState('');
   const [problem, setProblem] = useState<string | null>(null);
@@ -124,6 +203,13 @@ export function LocationPicker({
 
   const commit = useCallback(
     (lat: number, lng: number, method: CaptureMethod) => {
+      // Guard against a NaN pin from the canvas handler: `toFixed(5)` on NaN
+      // renders "NaN" in the summary row and posts `lat: NaN` to the API,
+      // which is worse than refusing the fix.
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+        setProblem('That point did not resolve to a coordinate. Try again, or enter the numbers by hand.');
+        return;
+      }
       const offset = district ? straightKm(district, { lat, lng }) : null;
       onChange({ lat, lng, method, source: CAPTURE_TO_SOURCE[method], offsetKm: offset });
     },
@@ -210,7 +296,34 @@ export function LocationPicker({
         <Stack gap="xxs" style={{ flex: 1, minWidth: 0 }}>
           {value ? (
             <>
-              <Row gap="sm" align="baseline">
+              <Row gap="sm" align="center" wrap>
+                {/* The badge is the whole point of #14: exactness has to be
+                    visible in the same glance as the digits, not implied by
+                    which button was pressed three interactions ago. */}
+                <View
+                  style={{
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    gap: 5,
+                    paddingHorizontal: 7,
+                    paddingVertical: 2,
+                    borderRadius: radius.sm,
+                    borderWidth: StyleSheet.hairlineWidth,
+                    borderColor: isPlaceholder ? t.status.warm.base : t.line.base,
+                    backgroundColor: isPlaceholder ? t.status.warm.soft : t.bg.sunken,
+                  }}
+                >
+                  <Small
+                    style={{
+                      fontSize: 10.5,
+                      fontWeight: '700',
+                      letterSpacing: 0.5,
+                      color: isPlaceholder ? t.status.warm.base : t.fg.muted,
+                    }}
+                  >
+                    {isPlaceholder ? '○ APPROXIMATE' : '● EXACT'}
+                  </Small>
+                </View>
                 <Num size={13}>
                   {value.lat.toFixed(5)}, {value.lng.toFixed(5)}
                 </Num>
@@ -221,7 +334,7 @@ export function LocationPicker({
                       ? 'from this device'
                       : value.method === 'map'
                         ? 'dropped on the map'
-                        : 'district centre — approximate'}
+                        : 'district centre'}
                 </Small>
               </Row>
               {value.offsetKm !== null ? (
@@ -243,48 +356,45 @@ export function LocationPicker({
         </Stack>
       </Row>
 
-      {/* The three capture controls, always visible. A call-taker reading a
-          coordinate off a phone mast or a caller's SMS has everything they need
-          here without opening anything. */}
-      <Row gap="xs" wrap>
-        <Button
-          label="Paste coordinates"
+      {/* #14: the question is asked outright. Four rows, one per way a
+          call-taker can know a location, each labelled with the exactness of
+          its answer *before* it is chosen — so the district centre can never
+          be tapped in the belief that it is a fix. */}
+      <Stack gap={4}>
+        <Label>How do you know the location?</Label>
+        <SourceRow
           icon="keyboard"
-          size="sm"
-          variant={mode === 'coordinates' ? 'primary' : 'secondary'}
+          title="Caller gave coordinates"
+          subtitle="Paste the AML fix or the numbers the caller read out"
+          exact
+          active={mode === 'coordinates'}
           onPress={() => setMode(mode === 'coordinates' ? 'none' : 'coordinates')}
         />
-        <Button
-          label="Drop pin"
-          icon="pin"
-          size="sm"
-          variant={mode === 'map' ? 'primary' : 'secondary'}
-          onPress={() => setMode(mode === 'map' ? 'none' : 'map')}
-        />
-        <Button
-          label={locating ? 'Locating…' : 'Use device location'}
+        <SourceRow
           icon="crosshair"
-          size="sm"
-          loading={locating}
+          title="Device location"
+          subtitle={locating ? 'Reading this device’s position…' : 'Use this console’s own GPS — you are at the scene'}
+          exact
+          busy={locating}
           onPress={useDevice}
         />
-      </Row>
-
-      {/* The fallback, stated as a fallback. It is a legitimate answer to "the
-          caller cannot say where they are" and it is recorded as approximate,
-          so it belongs on the screen rather than hidden behind a link. */}
-      <Row gap="sm" align="center" style={{ flexWrap: 'wrap' }}>
-        <Small muted style={{ fontSize: 11.5 }}>
-          Can&apos;t get an exact location?
-        </Small>
-        <Button
-          label="Use district centre — approximate"
-          size="sm"
-          variant="ghost"
-          onPress={useDistrictCentre}
-          disabled={!district}
+        <SourceRow
+          icon="pin"
+          title="Drop a pin on the map"
+          subtitle="The caller can describe the place; you place the point"
+          exact
+          active={mode === 'map'}
+          onPress={() => setMode(mode === 'map' ? 'none' : 'map')}
         />
-      </Row>
+        <SourceRow
+          icon="grid"
+          title={`District centre — ${district?.name ?? 'the district'}`}
+          subtitle="Only when nothing better exists. Dispatch will be ranked from headquarters, not the caller."
+          exact={false}
+          disabled={!district}
+          onPress={useDistrictCentre}
+        />
+      </Stack>
 
       {isPlaceholder && !farFromDistrict ? (
         <Banner
