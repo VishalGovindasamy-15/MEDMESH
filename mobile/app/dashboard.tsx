@@ -35,6 +35,7 @@ import {
   TextField,
   Title,
   TrustChip,
+  ConfirmDialog,
 } from '../src/ui';
 import { Icon } from '../src/ui/Icon';
 import { AppShell } from '../src/ui/Shell';
@@ -173,6 +174,10 @@ export default function HospitalDashboard() {
   const [answering, setAnswering] = useState<any | null>(null);
   const [acknowledged, setAcknowledged] = useState<Record<number, string>>({});
   const [draftDoctor, setDraftDoctor] = useState<DoctorDraft | null>(null);
+  // #18: removing a clinician deletes the row the dispatcher's specialist
+  // matching reads — it is not an undo-able list edit, and the button sits
+  // two pixels from "End duty" in a row the ward desk taps quickly.
+  const [removingDoctor, setRemovingDoctor] = useState<Doctor | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [advanced, setAdvanced] = useState(false);
   const [reporting, setReporting] = useState(false);
@@ -1021,7 +1026,7 @@ export default function HospitalDashboard() {
                       size="sm"
                       variant="ghost"
                       loading={busy === `remove:${doc.id}`}
-                      onPress={() => removeDoctor(doc)}
+                      onPress={() => setRemovingDoctor(doc)}
                     />
                   </Row>
                 ))}
@@ -1178,6 +1183,41 @@ export default function HospitalDashboard() {
           </Stack>
         </Row>
       </ScrollView>
+
+      {/* #18: the removal confirmation. It states the operational consequence
+          — the specialist stops counting towards dispatch matching — rather
+          than a generic "are you sure", because that consequence is the thing
+          a ward admin does not picture when tapping Remove next to End duty. */}
+      <ConfirmDialog
+        visible={removingDoctor !== null}
+        tone="danger"
+        title={removingDoctor ? `Remove ${removingDoctor.full_name} from the roster?` : 'Remove clinician'}
+        body={
+          removingDoctor ? (
+            <Stack gap="xs">
+              <Small>
+                {removingDoctor.full_name} ({specialtyLabel(removingDoctor.specialty)}) will no longer count
+                towards this facility&apos;s specialist cover. Dispatcher shortlists for{' '}
+                {specialtyLabel(removingDoctor.specialty).toLowerCase()} cases drop this hospital on the next
+                rebuild unless another {specialtyLabel(removingDoctor.specialty).toLowerCase()} specialist is on
+                the roster.
+              </Small>
+              <Small muted style={{ fontSize: 11 }}>
+                If they are simply off shift, use End duty instead — that keeps
+                the record and reverses at the next shift.
+              </Small>
+            </Stack>
+          ) : null
+        }
+        confirmLabel="Remove from roster"
+        busy={removingDoctor ? busy === `remove:${removingDoctor.id}` : false}
+        onConfirm={() => {
+          const doc = removingDoctor;
+          setRemovingDoctor(null);
+          if (doc) void removeDoctor(doc);
+        }}
+        onCancel={() => setRemovingDoctor(null)}
+      />
 
       <ReportSheet
         visible={reporting}

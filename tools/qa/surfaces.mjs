@@ -87,7 +87,13 @@ const browser = await chromium.launch();
   check('onboard: says nothing is published unverified', /verified/i.test(onboard.text));
 
   await page.getByPlaceholder('Coimbatore North Taluk Hospital').fill('Harness Test Hospital');
-  await page.getByText('Coimbatore', { exact: false }).first().click();
+  // Round 3: the district is chosen through the searchable picker, not a chip
+  // row — open the field, search, pick.
+  await page.getByText(/^Select district$/i).first().click();
+  await page.waitForTimeout(700);
+  await page.getByPlaceholder('District or headquarters').fill('coimbatore');
+  await page.waitForTimeout(500);
+  await page.getByText(/^Coimbatore/i).first().click();
   await page.waitForTimeout(400);
   await page.getByText('Next', { exact: true }).click();
   await page.waitForTimeout(500);

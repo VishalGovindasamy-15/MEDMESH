@@ -86,6 +86,11 @@ export default function IncidentWorkspace() {
   const [pending, setPending] = useState<
     { kind: 'commit' | 'override'; candidate: ShortlistCandidate; reason?: string; blockers?: string[] } | null
   >(null);
+  // #18: cancelling a call is the one destructive act on this screen that used
+  // to be a single tap — it stands a crew down mid-run and throws the bed hold
+  // back into the public pool, and the button sits in the same wrap row as the
+  // stage shortcuts an operator is tapping quickly on purpose.
+  const [confirmCancel, setConfirmCancel] = useState(false);
   const [crewProblem, setCrewProblem] = useState<string | null>(null);
 
   const load = useCallback(
@@ -523,7 +528,7 @@ export default function IncidentWorkspace() {
                       size="sm"
                       variant="ghost"
                       loading={busy === 'status:cancelled'}
-                      onPress={() => setStatus('cancelled')}
+                      onPress={() => setConfirmCancel(true)}
                     />
                   </Row>
                   <Small muted style={{ fontSize: 11 }}>
@@ -1056,6 +1061,34 @@ export default function IncidentWorkspace() {
 
       {/* An override is a clinical disagreement with the engine. It is allowed,
           and it is recorded, and the record has to say what the operator knew. */}
+      {/* #18: the cancel confirmation. States both costs — the crew and the
+          hold — because an operator cancelling a duplicate call still needs to
+          know a unit that is already moving will be stood down by this. */}
+      <ConfirmDialog
+        visible={confirmCancel}
+        tone="danger"
+        title={`Cancel ${incident?.reference ?? 'this call'}?`}
+        body={
+          <Stack gap="xs">
+            <Small>
+              The incident closes as cancelled{incident?.assigned_ambulance ? `, ${incident.assigned_ambulance.call_sign} is stood down` : ''}, and any bed hold at the receiving facility is released back to the public pool immediately.
+            </Small>
+            <Small muted style={{ fontSize: 11 }}>
+              Use this for a duplicate call, a wrong-number, or a caller who no
+              longer needs an ambulance — not for a change of hospital, which is
+              a re-route.
+            </Small>
+          </Stack>
+        }
+        confirmLabel="Cancel the call"
+        busy={busy === 'status:cancelled'}
+        onConfirm={async () => {
+          setConfirmCancel(false);
+          await setStatus('cancelled');
+        }}
+        onCancel={() => setConfirmCancel(false)}
+      />
+
       <ConfirmDialog
         visible={pending?.kind === 'override'}
         tone="danger"
