@@ -800,26 +800,33 @@ function UsersPanel({
       </Row>
 
       <Card padded={false}>
+        {/* The header row describes the desktop table's columns. On a phone the
+            rows are two stacked lines, so column headings would label nothing —
+            the strip says what the list is instead. */}
         <View style={[styles.thead, { borderBottomColor: t.line.base }]}>
-          <Small muted style={styles.cName}>
-            Person
-          </Small>
-          <Small muted style={styles.cRole}>
-            Role
-          </Small>
           {isDesktop ? (
-            <Small muted style={styles.cScope}>
-              Scope
+            <>
+              <Small muted style={styles.cName}>
+                Person
+              </Small>
+              <Small muted style={styles.cRole}>
+                Role
+              </Small>
+              <Small muted style={styles.cScope}>
+                Scope
+              </Small>
+              <Small muted style={styles.cSeen}>
+                Last sign-in
+              </Small>
+              <Small muted style={styles.cState}>
+                State
+              </Small>
+            </>
+          ) : (
+            <Small muted>
+              {filtered.length} account{filtered.length === 1 ? '' : 's'}
             </Small>
-          ) : null}
-          {isDesktop ? (
-            <Small muted style={styles.cSeen}>
-              Last sign-in
-            </Small>
-          ) : null}
-          <Small muted style={styles.cState}>
-            State
-          </Small>
+          )}
         </View>
         {filtered.map((u, i) => (
           <View
@@ -830,41 +837,78 @@ function UsersPanel({
                 borderBottomColor: t.line.subtle,
                 backgroundColor: i % 2 ? t.bg.sunken : 'transparent',
               },
+              /* One line on a desktop, two on a phone. The single-row layout
+                 needs ~400px of minimums (name, role pill, state + two ghost
+                 buttons); at 360px that either overflowed the card or wrapped
+                 the header differently from the rows. Stacked, every element
+                 has room and nothing has to shrink below its content. */
+              isDesktop ? null : { flexDirection: 'column', alignItems: 'stretch', gap: space.xs },
             ]}
           >
-            <Stack gap={2} style={styles.cName}>
-              <Small>{u.full_name}</Small>
-              <Small muted style={{ fontSize: 11.5 }}>
-                {u.email}
-              </Small>
-            </Stack>
-            <View style={styles.cRole}>
-              <Pill label={ROLE_LABEL[u.role] ?? u.role} tone={u.role === 'platform_admin' ? 'info' : 'neutral'} />
-            </View>
             {isDesktop ? (
-              <Small muted style={styles.cScope}>
-                {u.hospital ?? u.district ?? '—'}
-              </Small>
-            ) : null}
-            {isDesktop ? (
-              <Small muted style={styles.cSeen}>
-                {u.last_login_at ? relativeFromIso(u.last_login_at) : 'never'}
-              </Small>
-            ) : null}
-            {/* wrap: role + state + "last seen" is ~270px of text; without
-                wrap it keeps the card 623px wide on a 360px phone. */}
-            <Row gap={space.sm} align="center" wrap style={styles.cState}>
-              <StatusDot tone={u.is_active ? 'live' : 'neutral'} />
-              <Small muted>{u.is_active ? 'active' : 'disabled'}</Small>
-              <Button label="Edit" size="sm" variant="ghost" onPress={() => startEdit(u)} />
-              <Button
-                label={u.is_active ? 'Disable' : 'Enable'}
-                size="sm"
-                variant="ghost"
-                onPress={() => setToggleTarget(u)}
-                disabled={u.id === user?.id}
-              />
-            </Row>
+              <>
+                <Stack gap={2} style={styles.cName}>
+                  <Small>{u.full_name}</Small>
+                  <Small muted style={{ fontSize: 11.5 }}>
+                    {u.email}
+                  </Small>
+                </Stack>
+                <View style={styles.cRole}>
+                  <Pill label={ROLE_LABEL[u.role] ?? u.role} tone={u.role === 'platform_admin' ? 'info' : 'neutral'} />
+                </View>
+                <Small muted style={styles.cScope}>
+                  {u.hospital ?? u.district ?? '—'}
+                </Small>
+                <Small muted style={styles.cSeen}>
+                  {u.last_login_at ? relativeFromIso(u.last_login_at) : 'never'}
+                </Small>
+                <Row gap={space.sm} align="center" wrap style={styles.cState}>
+                  <StatusDot tone={u.is_active ? 'live' : 'neutral'} />
+                  <Small muted>{u.is_active ? 'active' : 'disabled'}</Small>
+                  <Button label="Edit" size="sm" variant="ghost" onPress={() => startEdit(u)} />
+                  <Button
+                    label={u.is_active ? 'Disable' : 'Enable'}
+                    size="sm"
+                    variant="ghost"
+                    onPress={() => setToggleTarget(u)}
+                    disabled={u.id === user?.id}
+                  />
+                </Row>
+              </>
+            ) : (
+              <>
+                <Row gap={space.sm} align="center" justify="space-between" wrap>
+                  <Stack gap={2} style={{ flexShrink: 1 }}>
+                    <Small>{u.full_name}</Small>
+                    {/* minWidth:0 lets the address ellipsize instead of holding
+                        the row open — RN-web text will not shrink below its
+                        longest word otherwise. */}
+                    <View style={{ minWidth: 0 }}>
+                      <Small muted style={{ fontSize: 11.5 }} numberOfLines={1}>
+                        {u.email}
+                      </Small>
+                    </View>
+                  </Stack>
+                  <Pill label={ROLE_LABEL[u.role] ?? u.role} tone={u.role === 'platform_admin' ? 'info' : 'neutral'} />
+                </Row>
+                <Row gap={space.sm} align="center" wrap>
+                  <StatusDot tone={u.is_active ? 'live' : 'neutral'} />
+                  <Small muted>{u.is_active ? 'active' : 'disabled'}</Small>
+                  {u.last_login_at ? (
+                    <Small muted style={{ fontSize: 11 }}>· seen {relativeFromIso(u.last_login_at)}</Small>
+                  ) : null}
+                  <View style={{ flexGrow: 1 }} />
+                  <Button label="Edit" size="sm" variant="ghost" onPress={() => startEdit(u)} />
+                  <Button
+                    label={u.is_active ? 'Disable' : 'Enable'}
+                    size="sm"
+                    variant="ghost"
+                    onPress={() => setToggleTarget(u)}
+                    disabled={u.id === user?.id}
+                  />
+                </Row>
+              </>
+            )}
           </View>
         ))}
       </Card>

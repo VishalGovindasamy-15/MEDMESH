@@ -1215,7 +1215,11 @@ function CandidateRow({
       <Divider />
 
       <Row justify="space-between" align="center" gap="sm" style={{ flexWrap: 'wrap' }}>
-        <Row gap="md" wrap>
+        {/* shrink + basis 0: this stat group measures ~440px at max-content
+            (distance, beds, ICU, ED pill), and RN-web's default flexShrink:0
+            made it refuse the wrap the parent row offers — the widest element
+            on the case screen at every phone width we support. */}
+        <Row gap="md" wrap style={{ flexShrink: 1, flexGrow: 1, flexBasis: 0, minWidth: 0 }}>
           <Row gap="xs" align="center">
             <Icon name="route" size={13} color={t.fg.faint} />
             <Num size={12.5} color={candidate.distance_is_road ? t.fg.base : t.fg.muted}>
@@ -1265,7 +1269,7 @@ function CandidateRow({
           ) : null}
         </Row>
 
-        <Row gap="sm" align="center">
+        <Row gap="sm" align="center" wrap style={{ flexShrink: 1 }}>
           <TrustChip score={candidate.trust?.score} />
           <Button
             label={selected ? 'Selected' : 'Select'}
