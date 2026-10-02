@@ -73,6 +73,9 @@ export function DistrictPicker({
   }, [districts, query]);
 
   const empty = districts.filter((d) => d.facilities === 0).length;
+  // The noun for the count column, when the caller's counts are not counting
+  // facilities (the doctors board passes "clinicians", the fleet panel "units").
+  const allCountUnit = districts.find((d) => d.countUnit)?.countUnit ?? null;
 
   return (
     <View
@@ -127,6 +130,12 @@ export function DistrictPicker({
           >
             <Icon name="globe" size={15} color={value === null ? t.accent.base : t.fg.faint} />
             <Body style={{ flex: 1, fontSize: 13.5, fontWeight: '600' }}>All districts</Body>
+            {/* The count says what it counts: "1069" beside Coimbatore's "183"
+                is only readable if the noun is there, and on the doctors board
+                the noun is clinicians, not facilities. */}
+            {allCountUnit ? (
+              <Small muted style={{ fontSize: 10.5 }}>{allCountUnit}</Small>
+            ) : null}
             <Num size={12} color={t.fg.muted}>
               {districts.reduce((sum, d) => sum + d.facilities, 0)}
             </Num>
@@ -165,6 +174,9 @@ export function DistrictPicker({
                   </Small>
                 ) : null}
               </Stack>
+              {d.countUnit ? (
+                <Small muted style={{ fontSize: 10.5 }}>{d.countUnit}</Small>
+              ) : null}
               <Num size={12} color={d.facilities ? t.fg.muted : t.fg.faint}>
                 {d.facilities}
               </Num>
