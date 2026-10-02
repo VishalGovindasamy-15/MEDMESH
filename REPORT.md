@@ -7,9 +7,9 @@
 | Backend | Python 3.13 · FastAPI · SQLAlchemy 2.0 · SQLite/WAL (Postgres-ready) |
 | Frontend | React Native 0.86 / Expo SDK 57 · expo-router · one codebase, web + iOS + Android |
 | Coverage | 38 districts · 152 facilities · 1,069 clinicians · 66 ambulances |
-| Code | 10,958 backend Python · 13,505 frontend TS/TSX · 1,514 lines of tests · 753 lines of browser harness |
-| Verified | 70 API tests · 64 route × viewport sweeps · role/notification/admin surface suite · Google Maps suite · clean typecheck |
-| Repository | local git, one commit, 182 files — push URL pending from you |
+| Code | 15,192 backend Python · 20,729 frontend TS/TSX · 3,916 lines of tests · 2,434 lines of browser harness |
+| Verified | 84 API tests passing · 9 browser harnesses · 32 route × viewport sweeps · 12 surfaces × 3 phone widths + Tamil · Google Maps suite · clean typecheck |
+| Repository | local git, 226 tracked files — push URL pending from you |
 
 ---
 
@@ -369,10 +369,74 @@ the console only sends the crew choice on the commit path. A declined-facility
 re-route refusal surfaced as a bare error banner instead of the override dialog
 its own payload described.
 
+## 5a. The third audit — pickers, 108 intake, crew lifecycle
+
+The reviewer walked the running app a third time. The headline finding was that
+the second pass's own checklist overclaimed: "one reusable searchable picker
+everywhere" was contradicted by four screens that still rendered district
+choice as a segmented control, a button row, or an eight-chip shortcut hiding
+30 of 38 districts. The instruction was explicit — fix the code first, then
+correct the documents — so three new harnesses were written *before* the fixes,
+every fix was proven by a failing check going green, and both this report and
+`AUDIT-CHECKLIST.md` were re-synced against the code afterwards.
+
+**Must-fix 1–8, one picker truly everywhere.** `DistrictPicker` now backs every
+district choice in the product: onboarding (was a 38-button row), admin
+create-user and edit-user (were segmented controls), fleet create, fleet
+filter and fleet edit, the doctors screen, and the directory's
+`FacilityPicker` (whose eight-district chip shortcut is gone, replaced by
+"Search facility or district" + an "All districts ▼" picker). The pickers are
+semantically different where the choices are: the fleet *filter* offers
+"All districts · 54 units" and clears, while the fleet *form* has no "All" row
+— a vehicle must belong somewhere. Counts are per surface: facilities on the
+admin forms, units on fleet, clinicians on doctors ("All districts — 1069
+doctors"), and the admin user form is role-explicit — hospital admins see
+Facility only (no district field), dispatchers and gov see Jurisdiction,
+drivers see Reporting district plus a vehicle picker.
+
+**Must-fix 9–12, behaviour under test.** The 108 intake now asks "How do you
+know the location?" as an explicit four-way choice — caller location, device
+location, map pin, or district centre — with the first three badged ● EXACT and
+the fallback ○ APPROXIMATE, which stores `location_approximate=true` and raises
+a warm banner in the incident workspace ("confirm the address with the caller
+before committing a unit"). A district centre can no longer be dispatched as if
+it were a doorstep. `probe-pickers.mjs` creates a real incident per source from
+a cold dispatcher session and asserts the stored fields server-side.
+`probe-crew-lifecycle.mjs` walks the driver from dispatch to handover, and at
+every stage it advances, verifies server-side, verifies the crew screen's
+dominant state band, **reloads the whole app**, and verifies the band survived
+the cold start — then asserts the standby receipt (last trip reference,
+handover time) and the GPS limitation label ("Live GPS while trip screen is
+active", kept per the audit's own instruction). Duty expiry across `duty_end`
+is enforced on read and covered by backend tests.
+
+**Polish 13–20.** The driver's current state is a full-width band at the top of
+the crew screen ("Transporting patient", "At hospital, handing over") — the
+buttons carry the next action, never the state. Fleet rows show GPS as an age
+("LAST POSITION · 12 h ago", warm past ten minutes). Doctor cards carry the
+filled/hollow `DutyBadge` (colour-blind safe) with countdown and an explicit
+OFF DUTY — SHIFT ENDED. The shell keeps "connection" and "data age" as two
+separate statements. Every destructive or consequential button now passes a
+confirmation dialog — including two this audit added: **cancel call** (names
+both costs: the crew stood down and the bed hold released) and **roster
+removal** (names the dispatch consequence, offers End duty as the reversible
+alternative). `probe-mobile-widths.mjs` measures 12 surfaces at 360/390/430 px
+plus Tamil at 360 and fails on any horizontal overflow; it caught two real
+bugs, both fixed — the console candidate stat row (React Native Web's default
+`flexShrink: 0` refused the parent's wrap until the row got
+`flexBasis: 0, flexShrink: 1, minWidth: 0`) and the admin users table (a
+five-column row needs ~400 px minimums, so on phones it renders as a stacked
+two-line card with a count strip instead of column headers).
+
+**21–22.** All nine browser harnesses were re-run green against the final
+build, and both documents were corrected to match the code — the checklist's
+picker rows now say what `probe-pickers` actually asserts, and this section
+exists because the previous ones described a product that was one audit behind.
+
 ## 6. Verification
 
 ```bash
-cd backend  && python3 -m pytest tests -q            # 83 passed, 1 skipped
+cd backend  && python3 -m pytest tests -q            # 84 passed, 1 skipped
 cd mobile   && npx tsc --noEmit                      # clean
 cd tools/qa && node sweep.mjs                        # 32 route × viewport, 0 problems
 cd tools/qa && node surfaces.mjs                     # all surfaces verified
@@ -380,6 +444,9 @@ cd tools/qa && node maps.mjs                         # Google Maps integration v
 cd tools/qa && node probe-admin.mjs                  # admin panel verified
 cd tools/qa && node probe-console-crew.mjs           # console crew workflow verified
 cd tools/qa && node probe-inbox-shell.mjs            # inbox and shell verified
+cd tools/qa && node probe-pickers.mjs                # pickers + 108 location sources verified
+cd tools/qa && node probe-crew-lifecycle.mjs         # crew lifecycle verified (refresh at every stage)
+cd tools/qa && node probe-mobile-widths.mjs          # all width checks passed (360/390/430 + Tamil)
 ./tools/package-release.sh                           # source-only archive, or refuses
 ```
 
@@ -416,12 +483,29 @@ dataset", and the separation of connection state from data age. The Google Maps
 harness grew assertions for camera fit and clustering, checked against a stub
 that records what the map was asked to do.
 
+The third audit added three more, each written before the fix it verifies.
+`probe-pickers.mjs` signs every role in cold and asserts the searchable picker
+on all eight converted surfaces — including that no legacy segmented or
+38-chip row survives — then creates a real 108 incident per location source
+and checks the stored `location_source`/`location_approximate` server-side.
+`probe-crew-lifecycle.mjs` releases its test unit through any leftover trip
+first (the simulator and previous runs leave units mid-job), dispatches with a
+retry loop that only accepts its own unit, and then walks the seven crew
+stages with a full app reload between each assertion. `probe-mobile-widths.mjs`
+measures twelve surfaces at 360, 390 and 430 px — plus the Tamil interface at
+360 — and fails on any element wider than its viewport.
+
 Four of the audit's findings were caught by these harnesses rather than by
 reading, and two of the harness failures were bugs in the harness — a ward
 session asserting on another facility's screen, and a crew fixture that assumed a
 unit was free. Both are fixed where they belonged, which is the point of having
 them: the suite is allowed to be wrong about the product, and is not allowed to
-stay wrong.
+stay wrong. The width harness paid for itself immediately: it found the
+candidate stat row and the admin users table overflowing at 360 px after every
+human-sized viewport looked fine, and the lifecycle harness found that a
+handover correctly *ends* the trip — the crew screen stands by with a receipt
+rather than showing a stage band, which the first draft of the harness wrongly
+asserted against.
 
 ---
 
@@ -429,15 +513,17 @@ stay wrong.
 
 `.github/workflows/ci.yml` runs three jobs on push and pull request:
 
-1. **Backend** — the 70-test suite. Seeds its own database at a temp path and
+1. **Backend** — the 84-test suite. Seeds its own database at a temp path and
    disables the simulator, so it needs no services and is order-independent.
 2. **Frontend** — typecheck, then a web export **without a Maps key**, then an
    assertion that no `AIzaSy…` string appears anywhere in the public bundle.
    `EXPO_PUBLIC_*` variables are inlined at build time and readable by anyone who
    loads the page; a key leaking into a public artefact is the single most
    expensive mistake available in this project, so CI fails on it.
-3. **Browser** — boots the API and the preview server, installs Playwright, runs
-   all three harnesses, uploads screenshots as artefacts.
+3. **Browser** — boots the API and both preview servers (the keyless build on
+   8080, plus a second export built with a deliberate dummy key on 8081 that
+   the maps harness stubs — no request leaves the runner), installs Playwright,
+   runs all nine harnesses, uploads screenshots as artefacts.
 
 Notably absent: lint and coverage gates. The failures that have actually hurt
 this project were structural — a ranking that ignored road distance, an allocator
@@ -509,9 +595,10 @@ Recorded rather than discovered later.
 
 ## 10. Repository
 
-Initialised locally with one commit, 182 files, `.gitignore` covering build
-artefacts, databases, native projects and credentials. A sanity check confirms no
-`node_modules`, database, key or keystore is staged.
+Initialised locally, 226 tracked files, `.gitignore` covering build artefacts,
+databases, native projects and credentials. A sanity check confirms no
+`node_modules`, database, key or keystore is staged, and
+`tools/package-release.sh` re-asserts the same list on every archive it builds.
 
 **I do not have the repository URL** — you selected "I'll paste it now" but the
 link did not come through. Send it and I will push, or tell me to add a remote and

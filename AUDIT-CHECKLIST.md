@@ -1,11 +1,13 @@
 # MedMesh — end-to-end UX + workflow hardening pass
 
 Working checklist for `problem_new.pdf` (54 findings + release hygiene + a
-70-step prioritised plan). Every row below was either fixed and verified, or
-recorded with the reason it is deliberately out of pilot scope. Verification
-means one of: the backend suite (`backend/tests/test_api.py`, 83 tests), or one
-of the six browser harnesses in `tools/qa` (`surfaces`, `sweep`, `maps`,
-`probe-admin`, `probe-console-crew`, `probe-inbox-shell`), or `tsc --noEmit`.
+70-step prioritised plan) and the third re-audit (22 findings, tracked in the
+final section). Every row below was either fixed and verified, or recorded with
+the reason it is deliberately out of pilot scope. Verification means one of:
+the backend suite (`backend/tests/test_api.py`, 84 tests), or one of the nine
+browser harnesses in `tools/qa` (`surfaces`, `sweep`, `maps`, `probe-admin`,
+`probe-console-crew`, `probe-inbox-shell`, `probe-pickers`,
+`probe-crew-lifecycle`, `probe-mobile-widths`), or `tsc --noEmit`.
 
 Legend: `[x]` done and verified · `[~]` done partly / deliberately scoped ·
 `[ ]` not started · `n/a` not applicable, with the reason.
@@ -87,6 +89,12 @@ live, and the crew screen itself is exercised by `maps.mjs`.
 - [x] 13–18, 20 · One reusable searchable `DistrictPicker` / `FacilityPicker`
       everywhere — the picker now also carries district chips with per-district
       counts, and the connector creation form uses it instead of 152 chips.
+      (Third-audit correction: this row was written before every district
+      *selector* was converted — see the "Third re-audit" section, items 1–8.
+      As of that pass the claim is true in code: `DistrictPicker` backs
+      onboarding, admin create/edit user, fleet create/filter/edit, the doctors
+      screen and the directory's `FacilityPicker`; no segmented or chip row of
+      38 districts remains anywhere.)
 - [x] 21 · **Bug**: ICU filter count computed from the unfiltered list — facet
       counts are computed over the district+search-scoped list (the list the
       chip will act on), and every chip now carries a count.
@@ -170,12 +178,16 @@ live, and the crew screen itself is exercised by `maps.mjs`.
 ## Phase 9 — Verification & release
 
 - [x] Frontend typecheck — `tsc --noEmit` clean.
-- [x] Backend suite green — 83 passed, 1 skipped (fixture-conditional), 2
+- [x] Backend suite green — 84 passed, 1 skipped (fixture-conditional), 2
       Starlette deprecation warnings.
 - [x] All browser harnesses green — `surfaces`, `sweep`, `maps` (keyed build),
-      `probe-admin`, `probe-console-crew`, `probe-inbox-shell`.
-- [x] All 38 districts present and selectable — picker chips + searchable
-      picker; dataset asserts 38 districts.
+      `probe-admin`, `probe-console-crew`, `probe-inbox-shell`,
+      `probe-pickers`, `probe-crew-lifecycle`, `probe-mobile-widths`.
+- [x] All 38 districts present and selectable — searchable `DistrictPicker` on
+      every district-selection surface (onboarding, admin create/edit user,
+      fleet create/filter/edit, doctors, directory via `FacilityPicker`);
+      dataset asserts 38 districts; `probe-pickers` asserts the pickers and
+      that no legacy segmented/chip row of districts remains.
 - [x] Every role's workflow driven end to end — citizen/hospital/dispatcher/
       gov/admin across the harnesses; crew through `maps.mjs` and the crew
       probe.
@@ -200,3 +212,124 @@ live, and the crew screen itself is exercised by `maps.mjs`.
 - `tools/qa/bootstrap.sh` and `tools/dev-up.sh` added: the harnesses and the
   whole stack rebuild from a clean container in two commands, in the order that
   works.
+
+---
+
+## Third re-audit (22 findings — pickers, 108 intake, crew lifecycle, polish)
+
+The reviewer walked the running app a third time and found that the "one picker
+everywhere" claim above was contradicted by four screens, that the 108 intake's
+location entry let an approximate district centre be dispatched as if it were
+exact, and that the driver app's state changes were legible only through button
+labels. Every "must fix" and "polish" item is listed with the verification that
+closed it. Three new harnesses were written for items 9–12 and 19–20 first, so
+each fix below was proven by a failing check going green, not by inspection.
+
+### Must fix — pickers (items 1–8)
+
+- [x] 1 · Onboarding's 38-district button row → `DistrictPicker` (`hideAll`,
+      facilities count) — `probe-pickers` walks the real onboarding flow.
+- [x] 2 · Admin create-user district `Segmented` → `DistrictPicker`; the form is
+      now role-explicit: hospital_admin sees **Facility only** (no district
+      field), dispatcher/gov see **Jurisdiction**, driver sees **Reporting
+      district + Vehicle picker**.
+- [x] 3 · Admin edit-user district `Segmented` → `DistrictPicker` with facility
+      counts ("Coimbatore · 12 facilities"); probe locates it by that text.
+- [x] 4 · Fleet create-vehicle district selector → `DistrictPicker` ("Base
+      district", units count, no "All" row — a vehicle must belong somewhere).
+- [x] 5 · Fleet filter → separate control: `DistrictPicker` with `allowClear`
+      ("All districts · 54 units" default). Filter and form are two different
+      pickers with different semantics, as the audit demanded.
+- [x] 6 · Fleet edit-vehicle district selector → `DistrictPicker` (`hideAll`,
+      no count — the modal is about one vehicle, not a directory).
+- [x] 7 · Doctors screen district selector → `DistrictPicker` with
+      **clinician counts** ("All districts — 1069 doctors", "Coimbatore · 61
+      doctors"); `countUnit` prop added for this.
+- [x] 8 · Directory `FacilityPicker`'s 8-district chip shortcut → a real
+      district selector inside the picker: "Search facility or district" input +
+      "All districts ▼" `DistrictPicker`; the chips that hid 30 districts are
+      gone.
+
+### Must fix — behaviour tests (items 9–12)
+
+- [x] 9 · Fresh-operator 108 creation → `probe-console-crew.mjs` signs a
+      dispatcher in cold through the real sign-in form (fresh browser context,
+      no stored token) and asserts the guided intake ("Create incident & find
+      hospital", optional triage disclosure, one-click district) and a live TN
+      reference in the queue; `probe-pickers.mjs` then creates real incidents
+      through that intake — one per location source (item 10) — and asserts
+      each lands server-side with the right fields.
+- [x] 10 · 108 creation with all four location sources → the intake asks
+      "How do you know the location?" explicitly: **Caller location / Device
+      location / Drop map pin / District centre — approximate**. Each maps to a
+      `location_source` (`manual`/`gps`/`map`/`district`) and the first three
+      badge "● EXACT", the fourth "○ APPROX" + `location_approximate=true`, so a
+      district centre can never be dispatched as if it were a doorstep.
+      `probe-pickers` creates an incident per source and asserts the stored
+      fields server-side.
+- [x] 11 · Driver lifecycle dispatch → handover **with a full app refresh at
+      every stage** → `probe-crew-lifecycle.mjs`: for each stage
+      (dispatched → en_route → at_scene → patient_onboard → transporting →
+      at_hospital → handed_over) it advances, verifies server-side, verifies the
+      dominant state band without a refresh, reloads the app and verifies the
+      band survived the cold start. After handover it asserts the standby
+      receipt (last trip reference, handover time) and the GPS limitation label.
+- [x] 12 · Doctor duty expiry after crossing `duty_end` → backend
+      `test_a_duty_window_that_has_elapsed_is_not_availability` (duty computed
+      on read; `duty_end` in the past ⇒ `duty_state='expired'`, excluded from
+      matching and from "on duty now" counts) plus the roster sweep test.
+
+### Polish (items 13–22)
+
+- [x] 13 · Driver current state visually dominant — a full-width stage band at
+      the top of the crew screen ("En route to scene", "Transporting patient",
+      …) with the reference, the stage's own verb and the next action beneath;
+      the buttons no longer carry the state.
+- [x] 14 · Location-source UI — the explicit four-way choice of item 10; the
+      ● EXACT / ○ APPROX distinction lives on the intake's capture card and in
+      the chosen-location summary, and an approximate scene is restated as a
+      warm banner at the top of the incident workspace ("Scene location is
+      approximate — confirm the address with the caller before committing a
+      unit"), so the distinction follows the call from intake to commit.
+- [x] 15 · Fleet GPS freshness — fleet rows show "LAST POSITION · 12 h ago" as
+      an age, warm-toned past ten minutes; the fleet map's freshness ring is
+      labelled in the legend (`probe-admin` asserts the age format).
+- [x] 16 · Doctor availability cards — `DutyBadge` with filled/hollow dot
+      (colour-blind safe), ON DUTY NOW / OFF DUTY / OFF DUTY — SHIFT ENDED,
+      countdown when on duty; the same badge on roster rows, facility rows and
+      the public directory.
+- [x] 17 · State vs freshness distinction — the shell separates "connection"
+      (live/reconnecting) from "data age" (pilot dataset, last snapshot);
+      capacity pins carry state as fill and report age as outline ring; trust
+      chips say which factor is which (`probe-inbox-shell` asserts the two
+      statements stay separate).
+- [x] 18 · Destructive/consequential button review — every one now passes a
+      `ConfirmDialog`: disable account, release crew, surge activate/stand-down,
+      commit, re-route, override (typed reason), complaint resolve, **cancel
+      call** (names both costs: crew stood down, bed hold released) and
+      **roster removal** (names the dispatch consequence, offers End duty as
+      the reversible alternative). Sign out stays one tap — it is destructive
+      only to the session.
+- [x] 19 · Mobile layout at 360/390/430 → `probe-mobile-widths.mjs` measures
+      12 surfaces at all three widths plus Tamil at 360 and fails on any
+      horizontal overflow. It caught two real bugs, both fixed: the console
+      candidate stat row (RN-web's default `flexShrink: 0` refused the parent's
+      wrap — now `flexBasis: 0, flexShrink: 1, minWidth: 0`) and the admin users
+      table (a 5-column row needs ~400 px minimums — on phones it renders as a
+      stacked two-line card with a count strip instead of column headers).
+- [x] 20 · Tamil overflow after the new selectors — the same harness runs the
+      directory, intake and crew screens in Tamil at 360 px; picker labels,
+      stage bands and badges all fit (translations exist for every new string
+      via `i18n.ts`).
+- [x] 21 · Full browser harness re-run — all nine harnesses green against the
+      final build (sweep: 32 route × viewport pairs; surfaces walked manually
+      per role; maps against the keyed build).
+- [x] 22 · `REPORT.md` matches the implementation — §5a (third audit) added,
+      §6 verification matrix lists all nine harnesses and 84 backend tests.
+
+### Kept, per the audit's own instruction
+
+- [x] Driver GPS foreground-only limitation stays clearly labelled — "Live GPS
+      while trip screen is active" on the crew screen and in the handover
+      receipt (`probe-crew-lifecycle` asserts the string after every reload).
+

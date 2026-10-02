@@ -113,11 +113,21 @@ jobs:
           cd mobile
           npm ci
           npx expo export --platform web --clear
+          # A second export with a Maps key, served on 8081 for the maps
+          # harness only. The harness stubs maps.googleapis.com and never lets
+          # a request leave the runner, so the key is a deliberate dummy — the
+          # loader only needs *a* key to initialise. The default 8080 build
+          # stays keyless, which is what the frontend job asserts above.
+          EXPO_PUBLIC_GOOGLE_MAPS_API_KEY="AIzaSyCI-DUMMY-KEY-STUBBED-IN-CI" \
+            npx expo export --platform web --output-dir dist-gmaps --clear
           cd ..
           nohup node tools/preview-server.mjs > /tmp/preview.log 2>&1 &
+          PORT=8081 STATIC_ROOT="$PWD/mobile/dist-gmaps" \
+            nohup node tools/preview-server.mjs > /tmp/preview-maps.log 2>&1 &
           for i in $(seq 1 40); do
-            if curl -sf http://127.0.0.1:8080/ > /dev/null; then
-              echo "preview up"; break
+            if curl -sf http://127.0.0.1:8080/ > /dev/null && \
+               curl -sf http://127.0.0.1:8081/ > /dev/null; then
+              echo "previews up"; break
             fi
             sleep 1
           done
@@ -139,6 +149,30 @@ jobs:
       - name: Verify the Google Maps integration
         working-directory: tools/qa
         run: node maps.mjs
+
+      - name: Verify the admin panel fixes
+        working-directory: tools/qa
+        run: node probe-admin.mjs
+
+      - name: Verify the console crew workflow
+        working-directory: tools/qa
+        run: node probe-console-crew.mjs
+
+      - name: Verify the inbox and shell statements
+        working-directory: tools/qa
+        run: node probe-inbox-shell.mjs
+
+      - name: Verify the pickers and 108 location sources
+        working-directory: tools/qa
+        run: node probe-pickers.mjs
+
+      - name: Verify the crew lifecycle with a refresh at every stage
+        working-directory: tools/qa
+        run: node probe-crew-lifecycle.mjs
+
+      - name: Verify every surface at 360/390/430px
+        working-directory: tools/qa
+        run: node probe-mobile-widths.mjs
 
       - name: Upload screenshots
         if: always()
