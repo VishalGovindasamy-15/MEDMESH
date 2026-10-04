@@ -174,6 +174,27 @@ jobs:
         working-directory: tools/qa
         run: node probe-mobile-widths.mjs
 
+      - name: Multi-user scenarios (six sessions, one backend, simulator off)
+        working-directory: tools/qa
+        run: |
+          # The demo control room commits and re-scores incidents within
+          # seconds of each other; left running, it would race every
+          # cross-session assertion in this probe. Restart the API without it
+          # — the probe raises, commits, declines and re-routes its own.
+          pkill -f "uvicorn app.main:app" || true
+          sleep 2
+          cd ../../backend
+          MEDMESH_SIMULATOR_ENABLED=false nohup python3 -m uvicorn app.main:app \
+            --host 0.0.0.0 --port 8000 --log-level warning > /tmp/api-quiet.log 2>&1 &
+          for i in $(seq 1 40); do
+            if curl -sf http://127.0.0.1:8000/api/v1/hospitals > /dev/null; then
+              echo "API up (simulator off)"; break
+            fi
+            sleep 1
+          done
+          cd ../tools/qa
+          node probe-multiuser.mjs
+
       - name: Upload screenshots
         if: always()
         uses: actions/upload-artifact@v4

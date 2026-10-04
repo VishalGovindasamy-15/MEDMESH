@@ -537,11 +537,16 @@ export function Segmented<T extends string>({
 
   if (scroll) {
     return (
-      /* flexGrow/Shrink/Basis: a horizontal ScrollView inside a wrapping row
-         sizes to its content unless its basis is zero — which is how a
-         38-option segmented control pushed its parent card past the viewport
-         on a phone instead of becoming scrollable. */
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ flexGrow: 1, flexShrink: 1, flexBasis: 0 }}>
+      /* Width must be capped by the parent, or a 38-option control pushes its
+         card past the viewport on a phone instead of becoming scrollable.
+         `flexShrink` + `minWidth: 0` does that on the row axis, where the
+         overflow lives, and stays inert on the column axis. The earlier
+         `flexBasis: 0` capped the right axis by accident: inside a column
+         parent the basis is the *height*, so the control collapsed to a
+         sliver and its options were neither visible nor clickable — which is
+         how the dispatch console's hold picker came to render its label and
+         its explanation with no control between them. */
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ flexShrink: 1, minWidth: 0 }}>
         {strip}
       </ScrollView>
     );

@@ -256,6 +256,7 @@ class NotificationKind(str, enum.Enum):
     """Everything that lands in a facility's or an operator's inbox."""
 
     INBOUND_PATIENT = "inbound_patient"  # two-way prep alert from dispatch
+    DESTINATION_CHANGED = "destination_changed"  # re-routed: old ward stood down
     HOLD_PLACED = "hold_placed"
     HOLD_EXPIRING = "hold_expiring"
     HOLD_RELEASED = "hold_released"

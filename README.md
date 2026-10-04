@@ -28,8 +28,11 @@ npm start              # Expo Go / simulator: scan the QR code
 ```
 
 Then open the app. The public directory needs no account. For the operational
-surfaces, `/sign-in` lists five one-tap pilot accounts (dispatcher, hospital bed
-control, ambulance crew, district officer, platform admin).
+surfaces, `/sign-in` lists the one-tap pilot accounts — one per role: citizen,
+hospital bed control, 108 dispatcher, ambulance crew, district officer and
+platform admin. They are served by the API only when `MEDMESH_DEMO_MODE=true`,
+so a deployment that forgets to configure it shows an empty panel rather than
+an administrator's password.
 
 ### Cross-platform networking
 
@@ -82,11 +85,16 @@ and the pre-flight checks worth running before handing a build to a hospital.
 | `services/connectors.py` | Hospital integration: key issue/rotate, health classification from last-seen and last-status, and the canonical FHIR mapping that vendor adapters normalise into. |
 | `services/notifications.py` | Facility- and user-addressed alerts, staleness sweep, retention. The two-way prep alert rides on this. |
 | `services/audit.py` | Append-only attribution for every capacity report, dispatch, verification decision and account change. |
+| `services/routing.py` | Road-distance provider seam: Google Distance Matrix implementation plus a geometric fallback behind one interface, with split cache lifetimes (distance is the road network, duration is traffic) and a 4-second timeout that degrades rather than unwinds a dispatch. |
+| `services/lifecycle.py` | The trip state machine — dispatched → en_route → at_scene → patient_onboard → transporting → at_hospital → handed_over / closed / cancelled — with legal-transition enforcement in one place. |
+| `services/references.py` | Check-then-take incident-reference allocator, shared by the console and the simulator so the 13,824-value daily space cannot collide. |
+| `services/roster.py` | Duty computed on read (`duty_end > now`), plus the 300-second sweep that closes elapsed windows. |
 | `live.py` | In-memory capacity projection + pub/sub fan-out. Interface-compatible with a Redis implementation. |
 | `routers/dispatch.py` | Incident intake → ranked shortlist → commit → bed hold → two-way alert → re-route → handover. |
 | `routers/governance.py` | Complaints loop, audit queries, user administration, estate health. |
 | `simulator.py` | Connector simulator + workflow driver, so the dashboards show movement without anyone clicking. Includes deliberate anomaly injection so the quarantine path is exercised rather than assumed. |
-| `seed.py` | Six districts, 29 facilities, 165 clinicians, 17 vehicles, 5,220 historical capacity records. |
+| `data/tn_districts.py` | All 38 Tamil Nadu districts — Tamil names, headquarters coordinates, Census 2011 populations, including the five carved out in 2019. |
+| `seed.py` | 38 districts, 152 facilities (99 public / 32 private / 21 trust), 1,069 clinicians, 66 ambulances, ~27,400 historical capacity records, 4 connector keys. |
 
 Endpoints follow §12 of the report; full interactive reference at `/docs`.
 
@@ -104,12 +112,15 @@ One Expo Router codebase, two layout modes:
 | `/facility/[id]` | Facility detail, roster, trust breakdown, 24 h history | anyone |
 | `/doctors` | Specialist cover, grouped by facility | anyone |
 | `/sign-in` | Staff sign-in + one-tap pilot accounts | anyone |
-| `/console` | 108 incident queue, intake, fleet | dispatcher |
-| `/console/[id]` | Incident workspace — ranked shortlist with reasons, commit, holds, re-route | dispatcher |
-| `/dashboard` | Hospital portal — quick-update keypad, roster, inbound alerts | hospital_admin |
-| `/crew` | Crew app — destination, route, capacity on arrival, one-tap re-route, offline cache | driver |
+| `/onboard` | Facility self-onboarding — details, capabilities, district picker | anyone (facility) |
+| `/console` | 108 incident queue, guided intake, fleet board | dispatcher |
+| `/console/[id]` | Incident workspace — ranked shortlist with reasons, crew picker, commit, holds, re-route | dispatcher |
+| `/dashboard` | Hospital portal — quick-update keypad, roster editor, inbound alerts | hospital_admin |
+| `/inbox` | Role-scoped notification inbox with workflow handoffs | any signed-in |
+| `/crew` | Crew app — dominant state band, destination, route, capacity on arrival, one-tap stage advance, handover receipt | driver |
 | `/analytics` | District rollup, SLA, surge control, CSV export | gov_official |
 | `/analytics/[district]` | District detail, trend, per-facility drill-down | gov_official |
+| `/admin` | Platform operations — accounts, fleet, connectors, audit trail, complaints | platform_admin |
 | `/account` | Session, role capability, platform health, connection diagnostics | any signed-in |
 
 ---
@@ -147,12 +158,35 @@ environment variables cover every tunable.
 ## Verification
 
 ```bash
-cd backend && python3 -m pytest tests -q      # 26 tests
+cd backend && python3 -m pytest tests -q      # 89 passed, 0 skipped
 cd mobile  && npx tsc --noEmit                # 0 errors
-cd tools/qa && node sweep.mjs                 # 31 route × viewport combinations
-cd tools/qa && node maps.mjs                  # Google Maps integration, 17 checks
+cd tools/qa && node sweep.mjs                 # 32 route × viewport combinations
 cd tools/qa && node surfaces.mjs              # role-scoped surfaces, per-viewport fit
+cd tools/qa && node maps.mjs                  # Google Maps integration (keyed build on :8081, loader stubbed)
+cd tools/qa && node probe-admin.mjs           # admin panel contracts
+cd tools/qa && node probe-console-crew.mjs    # dispatcher crew workflow + override
+cd tools/qa && node probe-inbox-shell.mjs     # inbox handoffs + shell statements
+cd tools/qa && node probe-pickers.mjs         # every district/facility picker + 108 location sources
+cd tools/qa && node probe-crew-lifecycle.mjs  # dispatch → handover, app refresh at every stage
+cd tools/qa && node probe-mobile-widths.mjs   # 12 surfaces × 360/390/430 px + Tamil @360
+# the multi-user probe needs the demo control room off, or it races every
+# cross-session assertion: restart the API with MEDMESH_SIMULATOR_ENABLED=false
+cd tools/qa && node probe-multiuser.mjs       # six live sessions, one backend, four outcomes per scenario
 ```
+
+`probe-multiuser.mjs` is the tenth harness and the only one that signs in
+several sessions at once: dispatch creation seen live by driver and ward, a
+decline that releases its hold and withdraws the destination on an untouched
+dispatcher screen, two re-route legs that move the hold and tell the bypassed
+ward, two dispatchers racing the last free unit (exactly one winner, the loser
+told plainly), an offline intake that fails honestly and retries exactly once,
+and the government CSV downloads. Every scenario records the backend response,
+the stored state, the initiator's screen and every other affected screen — a
+disagreement between those four fails the scenario.
+
+`tools/qa/bootstrap.sh` installs the harness environment (node modules,
+chromium, system libraries) and `tools/dev-up.sh` brings the whole stack up
+from a clean container; both are idempotent.
 
 The API suite covers the paths that matter operationally rather than chasing line
 coverage: quarantine of impossible updates, facility-scope RBAC enforcement,
@@ -200,10 +234,14 @@ later:
   renderer when a key is configured and the labelled schematic otherwise), but
   the preview build ships without one, so the default screenshot set shows the
   schematic. Set `EXPO_PUBLIC_GOOGLE_MAPS_API_KEY` and rebuild for real tiles.
-* **Routing uses the estimated ETA by default.** Google Directions is wired and
-  drawn when `EXPO_PUBLIC_GOOGLE_MAPS_DIRECTIONS_KEY` is set; without it the ETA
-  comes from `services/geo.py` and is labelled an estimate. A self-hosted OSRM
-  instance is the intended production path.
+* **Road ranking needs the server key; the drawn route needs the browser one.**
+  With `MEDMESH_GOOGLE_MAPS_SERVER_KEY` set, shortlists rank on Distance Matrix
+  drive times and say so ("via road · live traffic"); without it the ranking
+  falls back to the geometric estimate in `services/routing.py` and every
+  candidate is labelled "straight-line estimates". The crew screen's drawn
+  route uses `EXPO_PUBLIC_GOOGLE_MAPS_DIRECTIONS_KEY` (Directions, where
+  geometry is the point — two different APIs for two different questions).
+  A self-hosted OSRM instance is the intended production path for ranking.
 * **SQLite by default.** Set `MEDMESH_DATABASE_URL` to PostgreSQL; the
   window-function query in `repository.py` carries its `DISTINCT ON` variant in a
   comment.
@@ -213,6 +251,12 @@ later:
   bilingual (English and Tamil) with voice search in both. Machine-translating a
   dispatch console is a patient-safety risk, so the consoles stay English until a
   human translation is commissioned.
+* **Crew GPS is foreground-only, by design.** The crew app reports its position
+  only while the trip screen is open — no "always" location permission, no
+  background tracking of a pocketed handset. Both the crew screen and the
+  dispatcher's fleet board carry the label ("Live GPS while trip screen is
+  active") and show the age of the last fix, so the limitation is visible to
+  the people who plan around it.
 * **No offline/SMS/IVR fallback yet.** The crew screen caches its last known
   assignment and shows a stale banner, but the report's §7 offline path — an SMS
   or IVR channel for facilities and callers without data — is not implemented.
@@ -232,7 +276,10 @@ All prefixed `MEDMESH_` (`app/config.py`):
 | `ANOMALY_ABS_DELTA` | `12` | Absolute jump that triggers review |
 | `ANOMALY_PCT_DELTA` | `0.45` | Relative jump that triggers review |
 | `DEFAULT_HOLD_TTL_SECONDS` | `900` | Bed hold window |
+| `GOOGLE_MAPS_SERVER_KEY` | *(unset)* | IP-restricted Distance Matrix key; without it ranking uses the labelled geometric estimate |
+| `ROUTING_TIMEOUT_SECONDS` | `4.0` | Routing degrades to the fallback past this, never unwinds a dispatch |
 | `SIMULATOR_ENABLED` | `true` | **Set `false` in production** |
+| `DEMO_MODE` | `false` | Serves the pilot sign-ins; **never enable against real facility data** |
 
 Frontend variables are `EXPO_PUBLIC_*` and are **inlined at build time** — they
 are not read at runtime, so changing one requires a rebuild. See
@@ -250,28 +297,35 @@ medmesh/
 │   │   ├── live.py          capacity projection + fan-out
 │   │   ├── repository.py    read-side queries
 │   │   ├── security.py      hashing, JWT, RBAC dependencies
-│   │   ├── routers/         auth · hospitals · doctors · dispatch · analytics · governance · ws · connectors
-│   │   ├── services/        trust · matching · triage · geo · audit · reservations · connectors · notifications
-│   │   ├── seed.py          pilot dataset
+│   │   ├── data/            tn_districts.py — all 38 districts, real coordinates
+│   │   ├── routers/         auth · hospitals · doctors · dispatch · analytics · governance · ws · connectors · crew
+│   │   ├── services/        trust · matching · triage · geo · routing · lifecycle · references · roster · audit · reservations · connectors · notifications
+│   │   ├── seed.py          statewide pilot dataset (152 facilities)
 │   │   ├── simulator.py     connector + workflow loops
 │   │   └── main.py
-│   └── tests/test_api.py
+│   └── tests/test_api.py    89 tests
 ├── mobile/
-│   ├── app/                 expo-router routes (file = route)
+│   ├── app/                 expo-router routes (file = route), incl. admin/ · analytics/ · console/ · facility/
 │   ├── app.config.ts        permissions, Maps keys, per-platform config
 │   ├── eas.json             build profiles (development · preview · production)
 │   ├── setup.sh             npm install + keyless `expo export --clear`
 │   └── src/
 │       ├── api/             client, platform-aware base URL, domain types
-│       ├── components/      MapSurface · GoogleMap · MapCanvas · mapTypes · VoiceSearch
+│       ├── components/      MapSurface · GoogleMap · MapCanvas · mapTypes · VoiceSearch ·
+│       │                    DistrictPicker · LocationPicker · Selectors · DutyPresence ·
+│       │                    FacilityRow · ReportSheet · RouteCanvas
 │       ├── lib/             format · maps · i18n (English + Tamil)
 │       ├── state/           AuthProvider · LiveProvider · SessionGate
 │       ├── theme/           tokens (single source of colour/type/space) + language
-│       └── ui/              design system primitives
+│       └── ui/              design system primitives (incl. ConfirmDialog, Shell)
 ├── tools/
+│   ├── dev-up.sh            clean container → running pilot, one command
+│   ├── package-release.sh   source-only release archive, or refuses
 │   ├── preview-server.mjs   static dist/ + API/WS proxy, one origin
-│   └── qa/                  setup.sh · sweep.mjs · maps.mjs · surfaces.mjs
+│   └── qa/                  bootstrap.sh + ten browser harnesses (sweep · surfaces · maps · seven probes)
 ├── docs/shots/              generated screenshots
+├── AUDIT-CHECKLIST.md       both audits, row by row, with the verification that closed each
+├── REPORT.md                full project report
 └── ANDROID_BUILD.md         APK / AAB build guide
 ```
 

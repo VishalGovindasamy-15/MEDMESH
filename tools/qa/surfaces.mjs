@@ -274,12 +274,24 @@ const browser = await chromium.launch();
   check('analytics: renders district rows', /occupancy|districts/i.test(overview.text));
 
   const download = page.waitForEvent('download', { timeout: 15000 }).catch(() => null);
-  await page.getByText('Export CSV', { exact: true }).first().click();
+  await page.getByText('Export capacity', { exact: true }).first().click();
   const file = await download;
   check(
     'analytics: the capacity export downloads a file',
     !!file && /\.csv$/i.test(file.suggestedFilename()),
     file ? file.suggestedFilename() : 'no download was offered',
+  );
+
+  // The incident file existed on the server, scoped and tested, but no screen
+  // ever called it — the officer's own export was reachable only by hand-built
+  // HTTP. It has a button now; press it too.
+  const incidentDownload = page.waitForEvent('download', { timeout: 15000 }).catch(() => null);
+  await page.getByText('Export incidents', { exact: true }).first().click();
+  const incidentFile = await incidentDownload;
+  check(
+    'analytics: the incident export downloads a file',
+    !!incidentFile && /\.csv$/i.test(incidentFile.suggestedFilename()),
+    incidentFile ? incidentFile.suggestedFilename() : 'no download was offered',
   );
 
   await page.goto(`${BASE}/analytics/1`, { waitUntil: 'networkidle' });

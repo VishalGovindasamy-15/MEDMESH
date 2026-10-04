@@ -208,6 +208,7 @@ def unread_count(db: Session, *, user: User) -> int:
 
 KIND_LABELS: dict[NotificationKind, str] = {
     NotificationKind.INBOUND_PATIENT: "Inbound patient",
+    NotificationKind.DESTINATION_CHANGED: "Destination changed",
     NotificationKind.HOLD_PLACED: "Bed hold placed",
     NotificationKind.HOLD_EXPIRING: "Bed hold expiring",
     NotificationKind.HOLD_RELEASED: "Bed hold released",

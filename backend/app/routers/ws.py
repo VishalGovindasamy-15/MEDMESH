@@ -8,6 +8,37 @@ connected tablet, which is both a privacy question and a bandwidth one.
 
 Initial snapshot-then-delta: the client gets current state on connect so it never
 renders an empty grid, then only deltas. Reconnect is cheap and idempotent.
+
+DELTA SCOPING CONTRACT (fourth audit). The snapshot is the public directory and
+stays whole; the deltas are not, and hiding a button in the UI is not a scope.
+For every envelope after the snapshot:
+
+  capacity.updated, doctor.duty
+      Everyone, including anonymous sockets. The directory publishes these
+      figures on unauthenticated HTTP by design; the socket carries no more.
+  surge.opened, surge.closed
+      Operations (dispatcher, platform admin) and government officials.
+  notification.created
+      The addressed user (``user_id == me``), or — for facility-addressed rows,
+      which carry ``user_id`` null and a ``hospital_id`` — any hospital admin
+      of that facility. A per-user row addressed to somebody else is nobody
+      else's business.
+  hospital.inbound, feedback.created, hold.placed, hold.released
+      Operations, plus hospital admins of the facility the event names
+      (null-guarded: an event without a facility id is operations-only).
+  incident.*
+      Operations. A driver never sees ``incident.created`` (the queue is not
+      theirs) and sees every other incident event only for the trip carrying
+      them — resolved by a per-event join, so re-crewing mid-connection
+      changes what they see. A hospital admin never sees ``incident.created``
+      either, and sees the rest only when the incident names their facility
+      as destination or as the destination it was re-routed away from.
+  anything unknown
+      Operations only. New event kinds fail closed until somebody decides
+      who they belong to.
+
+An anonymous socket therefore receives public directory deltas and nothing
+else, and ``scope=mine`` still narrows the snapshot when a client asks.
 """
 
 from __future__ import annotations
@@ -21,10 +52,15 @@ from sqlalchemy import select
 
 from ..database import SessionLocal
 from ..live import live_store
-from ..models import Hospital, User, UserRole
+from ..models import Hospital, Incident, User, UserRole
 from ..repository import latest_capacity_map, trust_scores
 
 router = APIRouter(tags=["realtime"])
+
+PUBLIC_DELTAS = {"capacity.updated", "doctor.duty"}
+SURGE_DELTAS = {"surge.opened", "surge.closed"}
+FACILITY_DELTAS = {"hospital.inbound", "feedback.created", "hold.placed", "hold.released"}
+OPS_ROLES = (UserRole.DISPATCHER, UserRole.PLATFORM_ADMIN)
 
 
 def _authenticate(token: str | None) -> User | None:
@@ -45,6 +81,74 @@ def _authenticate(token: str | None) -> User | None:
         return user
     finally:
         db.close()
+
+
+def _assigned_to_driver(incident_id: int | None, user_id: int) -> bool:
+    """Is this user's linked ambulance carrying this incident, right now?
+
+    Re-resolved per event on purpose: a trip re-crewed mid-connection must
+    stop reaching the old driver and start reaching the new one, and a cached
+    answer at subscribe time would get that wrong in both directions.
+    """
+    if incident_id is None:
+        return False
+    db = SessionLocal()
+    try:
+        row = db.execute(
+            select(Incident.assigned_ambulance_id).where(Incident.id == incident_id)
+        ).first()
+        if row is None or row[0] is None:
+            return False
+        from ..models import Ambulance
+
+        amb = db.get(Ambulance, row[0])
+        return amb is not None and amb.driver_id == user_id
+    finally:
+        db.close()
+
+
+def _visible(user: User | None, event: str, data: dict) -> bool:
+    """May this socket receive this envelope? See the module contract."""
+    if event in PUBLIC_DELTAS:
+        return True
+    if user is None:
+        return False
+    is_ops = user.role in OPS_ROLES
+    if event in SURGE_DELTAS:
+        return is_ops or user.role is UserRole.GOV_OFFICIAL
+    if event == "notification.created":
+        owner = data.get("user_id")
+        if owner:
+            return owner == user.id
+        facility = data.get("hospital_id")
+        if facility:
+            return user.role is UserRole.HOSPITAL_ADMIN and user.hospital_id == facility
+        return False
+    if event in FACILITY_DELTAS:
+        if is_ops:
+            return True
+        facility = data.get("hospital_id")
+        return (
+            facility is not None
+            and user.role is UserRole.HOSPITAL_ADMIN
+            and user.hospital_id == facility
+        )
+    if event.startswith("incident."):
+        if is_ops:
+            return True
+        if event == "incident.created":
+            return False
+        incident_id = data.get("incident_id") or data.get("id")
+        if user.role is UserRole.DRIVER:
+            return _assigned_to_driver(incident_id, user.id)
+        if user.role is UserRole.HOSPITAL_ADMIN:
+            return user.hospital_id is not None and user.hospital_id in (
+                data.get("hospital_id"),
+                data.get("previous_hospital_id"),
+            )
+        return False
+    # Unknown event kind: fail closed to operations.
+    return is_ops
 
 
 def _snapshot_for(user: User | None) -> dict:
@@ -120,6 +224,8 @@ async def feed(
                 hid = envelope.get("data", {}).get("hospital_id")
                 if hid is not None and hid != hospital_filter:
                     continue
+            if not _visible(user, envelope.get("event", ""), envelope.get("data", {}) or {}):
+                continue
             await websocket.send_text(json.dumps(envelope, default=str))
     except WebSocketDisconnect:
         pass
@@ -149,8 +255,13 @@ async def incident_feed(websocket: WebSocket, token: str | None = Query(default=
             except asyncio.TimeoutError:
                 await websocket.send_text(json.dumps({"event": "ping", "data": {}}))
                 continue
-            if envelope.get("event") in wanted:
-                await websocket.send_text(json.dumps(envelope, default=str))
+            if envelope.get("event") not in wanted:
+                continue
+            # Same contract as the main feed: a driver on this socket gets
+            # their own trip's events, not the whole queue's.
+            if not _visible(user, envelope.get("event", ""), envelope.get("data", {}) or {}):
+                continue
+            await websocket.send_text(json.dumps(envelope, default=str))
     except WebSocketDisconnect:
         pass
     except Exception:

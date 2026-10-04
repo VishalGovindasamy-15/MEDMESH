@@ -167,6 +167,31 @@ export default function AnalyticsScreen() {
     }
   };
 
+  /**
+   * Download the jurisdiction's incident file.
+   *
+   * The endpoint existed, was jurisdiction-scoped and was tested, but no
+   * screen called it: the policy reviewer's own export was reachable only by
+   * hand-building an HTTP request. This screen is already gated to the two
+   * roles the endpoint allows, so the button needs no extra guard.
+   */
+  const exportIncidents = async () => {
+    setBusy('export-incidents');
+    setError(null);
+    try {
+      const { filename } = await downloadCsv(
+        '/analytics/export/incidents.csv?days=30',
+        'medmesh-incidents.csv',
+      );
+      setNotice(`Exported ${filename}.`);
+    } catch (e) {
+      setNotice(null);
+      setError(e instanceof ApiError ? e.message : 'Export failed — nothing was downloaded.');
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const state = overview.state;
   const chartWidth = isDesktop ? Math.min(880, width - 420) : width - 96;
   const sorted = overview.districts;
@@ -177,13 +202,24 @@ export default function AnalyticsScreen() {
       subtitle={`${state.facilities_reporting} of ${state.facilities} facilities reporting · generated ${dateTime(overview.generated_at)}`}
       maxWidth={1440}
       actions={
-        <Row gap="xs">
+        /* Three actions now, and a phone is 360px wide. The header row lets
+           its children shrink, but a flex child's shrink defaults to zero —
+           without it this row keeps its 466px intrinsic width and its own
+           wrap never gets a narrower box to wrap inside. */
+        <Row gap="xs" wrap style={{ flexShrink: 1, minWidth: 0 }}>
           <Button
-            label="Export CSV"
+            label="Export capacity"
             icon="download"
             size="sm"
             loading={busy === 'export'}
             onPress={exportCapacity}
+          />
+          <Button
+            label="Export incidents"
+            icon="download"
+            size="sm"
+            loading={busy === 'export-incidents'}
+            onPress={exportIncidents}
           />
           <Button
             label={overview.surge ? 'Stand down surge' : 'Activate surge'}

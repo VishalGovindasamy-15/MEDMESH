@@ -752,6 +752,7 @@ async def dispatch(
             "reference": incident.reference,
             "hospital_id": hospital.id,
             "hospital_name": hospital.name,
+            "ambulance_id": ambulance.id,
             "ambulance_call_sign": ambulance.call_sign,
             "eta_to_scene_minutes": leg.eta_minutes,
             "distance_provider": leg.provider,
@@ -1101,6 +1102,39 @@ async def reroute(
 
     db.flush()
 
+    # Both wards get a durable inbox row, not only a socket frame. The new
+    # destination gets the same prep alert a fresh dispatch would have sent —
+    # a re-routed ambulance arrives just as fast and the ward has just as much
+    # (or little) warning; before this, a re-route notified nobody and the
+    # receiving ward learned about the patient from a hallway conversation.
+    # The previous ward is told the case is no longer inbound so it stops
+    # preparing a bay for a vehicle that is not coming.
+    amb = db.get(Ambulance, incident.assigned_ambulance_id) if incident.assigned_ambulance_id else None
+    origin_lat = amb.lat if amb is not None else incident.lat
+    origin_lng = amb.lng if amb is not None else incident.lng
+    reroute_leg = estimate_leg(origin_lat, origin_lng, hospital.lat, hospital.lng)
+    notify.notify_inbound(
+        db,
+        incident,
+        hospital=hospital,
+        eta_minutes=int(reroute_leg.eta_minutes),
+        hold_resource=payload.hold_resource,
+    )
+    if previous is not None:
+        notify.notify_facility(
+            db,
+            hospital_id=previous.id,
+            kind=NotificationKind.DESTINATION_CHANGED,
+            title=f"{incident.reference} is no longer inbound",
+            body=(
+                f"Re-routed to {hospital.short_name}. "
+                "Any bed hold placed for this case has been released back to your pool."
+            ),
+            severity="info",
+            incident_id=incident.id,
+            payload={"new_hospital_id": hospital.id, "new_hospital": hospital.short_name},
+        )
+
     audit.record(
         db,
         action="incident.reroute",
@@ -1123,7 +1157,11 @@ async def reroute(
             "incident_id": incident.id,
             "hospital_id": hospital.id,
             "hospital_name": hospital.name,
-            "released_holds": released,
+            "previous_hospital_id": previous.id if previous else None,
+            "ambulance_id": incident.assigned_ambulance_id,
+            "released_holds": [
+                {"hospital_id": h.hospital_id, "resource": h.resource} for h in released
+            ],
         },
     )
     return {

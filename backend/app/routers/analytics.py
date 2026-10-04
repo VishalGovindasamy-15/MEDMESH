@@ -575,9 +575,14 @@ def export_incidents(
     since = utcnow() - timedelta(days=days)
     stmt = select(Incident).where(Incident.created_at >= since, Incident.district_id.in_(allowed))
     incidents = list(db.execute(stmt.order_by(Incident.created_at.desc())).scalars().all())
-    hospitals = {
-        h.id: h for h in db.execute(select(Hospital)).scalars().all() if h.district_id in allowed
-    }
+    # The jurisdiction filter belongs on the incidents, not on the name
+    # lookup: a cross-district transfer — a Coimbatore call taken by the
+    # trauma centre just over the line — is exactly the case policy review
+    # reads this file for, and filtering the map by district silently left
+    # those rows' hospital-name column empty. The officer already holds the
+    # incident and its hospital id; the public directory publishes every
+    # hospital name anonymously, so resolving it widens nothing.
+    hospitals = {h.id: h for h in db.execute(select(Hospital)).scalars().all()}
 
     def _iso(value) -> str:
         """ISO-8601 with an explicit Z. Naive UTC throughout, as stored."""

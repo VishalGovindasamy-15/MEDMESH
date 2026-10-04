@@ -192,7 +192,7 @@ DEMO_ACCOUNTS = [
         "email": "citizen@medmesh.in",
         "password": "Citizen@2026",
         "surface": "/",
-        "description": "Public bed and ICU search, Urdu/Tamil/English, no account needed to browse.",
+        "description": "Public bed and ICU search in English or Tamil, no account needed to browse.",
     },
     {
         "role": "hospital_admin",

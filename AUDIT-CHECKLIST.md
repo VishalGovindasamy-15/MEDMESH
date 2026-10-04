@@ -333,3 +333,111 @@ each fix below was proven by a failing check going green, not by inspection.
       while trip screen is active" on the crew screen and in the handover
       receipt (`probe-crew-lifecycle` asserts the string after every reload).
 
+## Fourth re-audit — consolidated fix-and-verify plan
+
+Stance of this round: run the current revision, capture real failures, and
+change code only where a test demonstrates a problem. The multi-user items are
+run with separate browser profiles against ONE backend process, each scenario
+recording four outcomes — backend response, stored state, initiator screen,
+other users' screens — any disagreement a failure. The demo control room is
+switched off for the multi-user run; left on, it commits and re-scores
+incidents within seconds and would race every assertion.
+
+### Live events and notification scoping (server-side role scoping)
+
+- [x] 1 · WebSocket deltas are scoped per role and per relationship
+      (`f048001`): a driver receives `incident.*` only for the trip carrying
+      them — resolved by a per-event join, so a re-crew mid-connection changes
+      what they see; a ward receives its own facility-addressed notification
+      rows; surge events stay with operations and government; unknown event
+      kinds fail closed to operations. Snapshots keep serving the full estate;
+      the two new socket tests fail against the old pass-through filter
+      (verified by reverting it).
+- [x] 2 · A re-route notifies both ends: the new destination gets the prep
+      alert a fresh dispatch sends (ETA recomputed from the ambulance's live
+      position), the bypassed ward a durable "Destination changed — no longer
+      inbound" row; `incident.dispatched` carries the ambulance id and
+      `incident.rerouted` carries the previous hospital and the released
+      holds.
+- [x] 3 · Backend suite: 84 passed + 1 skip became **89 passed, 0 skipped**;
+      the skip is now a deterministic test.
+
+### Exports
+
+- [x] 4 · Downloaded the live export and read it, which is what the audit
+      asked for: 39 of 189 rows carried an empty destination-name column —
+      the hospital-name lookup was filtered by the officer's jurisdiction,
+      while jurisdiction belongs on the incident filter. Cross-district
+      transfers, the case policy review reads the file for, lost their
+      destination's name. Fixed (`8f533e1`); regression test fails against the
+      old map; the live re-download shows 0 blank names across 39
+      cross-district rows.
+- [x] 5 · The incident export had no UI path at all — the endpoint existed,
+      scoped and tested, but no screen called it. Analytics now offers
+      "Export incidents" beside "Export capacity" (renamed from the ambiguous
+      "Export CSV"); `surfaces.mjs` presses both and requires files; the auth
+      matrix was re-checked live (gov 200 with server filename, hospital
+      admin 403, expired or absent token 401).
+
+### Input validation and authorisation spot checks
+
+- [x] 6 · `lat: 95` → 422 with a readable bound; `open → handed_over` refused
+      with the legal transitions listed; another facility's capacity write →
+      403; a decline without a structured reason → 422 (enum vocabulary in the
+      message) and `test_a_decline_needs_a_reason` covers it; expired token →
+      401 on exports, incidents and the socket.
+- [x] 7 · Simulator commits log their outcome ("demo control room: TN-…
+      committed to KTGR (icu hold)") — observed in the live API log, so a demo
+      incident is never mistaken for an operator's.
+
+### The multi-user probe (tenth harness)
+
+- [x] 8 · `probe-multiuser.mjs`, six sessions through the real sign-in form,
+      one backend, four recorded outcomes per scenario, all green on the final
+      bundle: S1 dispatch creation with an explicitly chosen NICU crew and a
+      bed hold — driver and ward see it WITHOUT refresh; S2 decline releases
+      the hold, leaves the eligible set and withdraws the destination on the
+      dispatcher's untouched screen; S4 two re-route legs — the hold moves,
+      the bypassed ward gets its "no longer inbound" row, the driver's screen
+      follows both legs, the crew is never swapped, and a ward that declined
+      itself is asserted NOT to be notified (asserting one would be asserting
+      a bug); S5 two dispatchers race the last free unit — exactly one commit
+      wins, the loser is told plainly, one live trip in the database; S9
+      offline intake fails honestly and the retry succeeds exactly once under
+      a double-click; S10 the gov session downloads both CSVs.
+- [x] 9 · Scenarios the other harnesses own stay owned by them and were re-run
+      green: crew lifecycle across refreshes (`probe-crew-lifecycle`), duty
+      expiry (backend roster tests + `sweep`), admin edits (`probe-admin`,
+      `probe-pickers`), notifications and complaints acted on
+      (`probe-inbox-shell`).
+
+### Defects the new probe caught in the product
+
+- [x] 10 · The dispatch console's "Reserve on dispatch" hold picker rendered
+      its label and its explanation with no clickable control between them at
+      desktop widths: the segmented control's scroll variant capped its main
+      axis with `flexBasis: 0`, which is the width in a row parent and the
+      *height* in a column one. A dispatcher could not take a bed hold through
+      the interface at all. Replaced with `flexShrink + minWidth: 0` (caps the
+      row axis, inert on the column axis), verified by a real click and by the
+      probe committing an actual hold.
+- [x] 11 · The analytics header actions row (three buttons) overflowed a
+      360 px phone: a flex child's shrink defaults to zero, so its own wrap
+      never received a narrower box. `probe-mobile-widths` caught it on the
+      rebuilt bundle; wrap + shrink fixed it and the harness is green.
+
+### Verification matrix
+
+- [x] 12 · Ten browser harnesses green against the final build (sweep 32
+      route × viewport pairs; surfaces incl. both export downloads; maps on
+      the keyed build; widths at 360/390/430 + Tamil; multi-user with the
+      simulator off), backend pytest 89 passed / 0 skipped, `tsc --noEmit`
+      clean, keyless `dist/` free of any Maps key, previews rebuilt.
+
+### Kept, per the audit's own instruction
+
+- [x] The §5 limitations table stands as documented, not as bugs: synthetic
+      data labelled in-product, no SMS/IVR, foreground-only GPS labelled on
+      the crew screen, keyless map fallback labelled, single-process
+      SQLite/in-memory fan-out, English consoles, Android package not
+      established.

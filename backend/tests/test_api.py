@@ -1570,7 +1570,9 @@ def _release_unit(c, dispatcher, ambulance_id: int) -> None:
     for item in detail.get("recent_incidents", []):
         if item["status"] not in live:
             continue
-        for step in ("en_route", "at_scene", "patient_onboard", "at_hospital", "handed_over"):
+        # Every rung of the ladder, in order: skipping one strands the trip
+        # one stage short of handover and the unit is never released.
+        for step in ("en_route", "at_scene", "patient_onboard", "transporting", "at_hospital", "handed_over"):
             response = c.post(
                 f"{API}/incidents/{item['id']}/status",
                 headers=dispatcher,
@@ -3348,6 +3350,77 @@ def test_the_incident_export_carries_the_officers_jurisdiction():
         assert wide.status_code == 200
 
 
+def test_the_incident_export_names_a_cross_district_destination():
+    """A cross-district transfer must keep its destination's name.
+
+    The export's hospital-name lookup was filtered by the officer's
+    jurisdiction, so an incident raised in their district but carried to a
+    hospital over the line exported with an empty name column — silently,
+    and precisely for the transfers policy review reads the file for. Found
+    by downloading the current revision's export and looking at it, which is
+    what the fourth audit asked for.
+    """
+    import csv as csvlib
+    import io
+
+    from sqlalchemy import select
+
+    from app.database import SessionLocal
+    from app.models import Hospital, Incident
+
+    with client() as c:
+        gov = _login(c, "gov@medmesh.in", "District@2026")
+        dispatcher = _login(c, "dispatch@medmesh.in", "Dispatch@108")
+        me = c.get(f"{API}/auth/me", headers=gov).json()
+        home = me["district_id"]
+        assert home is not None, "fixture needs a district-scoped gov account"
+
+        created = c.post(
+            f"{API}/incidents",
+            headers=dispatcher,
+            json={
+                "category": "trauma_fall",
+                "urgency": "P2",
+                "lat": 11.0168,
+                "lng": 76.9558,
+                "landmark": "Export fixture",
+                "district_id": home,
+            },
+        )
+        assert created.status_code == 201, created.text
+        incident_id = created.json()["id"]
+        reference = created.json()["reference"]
+
+        # Stand in the transfer's outcome: a destination over the line. Set
+        # directly rather than through dispatch, because whether the matching
+        # engine offers an out-of-district facility depends on catchment and
+        # capacity, and this test is about the export, not the ranking.
+        db = SessionLocal()
+        try:
+            away = db.execute(
+                select(Hospital).where(Hospital.district_id != home).limit(1)
+            ).scalar_one()
+            row = db.get(Incident, incident_id)
+            row.assigned_hospital_id = away.id
+            db.commit()
+            away_id, away_name = away.id, away.name
+        finally:
+            db.close()
+
+        export = c.get(f"{API}/analytics/export/incidents.csv?days=1", headers=gov)
+        assert export.status_code == 200, export.text
+        rows = list(csvlib.DictReader(io.StringIO(export.text)))
+        mine = next((r for r in rows if r["reference"] == reference), None)
+        assert mine is not None, "the jurisdiction's own incident is missing from the export"
+        assert mine["assigned_hospital_id"] == str(away_id)
+        assert mine["assigned_hospital"] == away_name, (
+            f"cross-district destination exported without its name: {mine['assigned_hospital']!r}"
+        )
+        # The jurisdiction guarantee the test above proves is untouched by
+        # the wider name lookup: still only this officer's district in rows.
+        assert {r["district_id"] for r in rows} == {str(home)}, "the export leaked other districts"
+
+
 # --------------------------------------------------------------------------- #
 # Crew assignment persistence
 #
@@ -3843,6 +3916,18 @@ def test_a_blocked_facility_needs_a_typed_override_and_the_audit_keeps_it():
         assert entry is not None
         assert reason in entry["summary"], "the override reason must be in the audit trail"
 
+        # The override committed a real trip on an engine-chosen unit. Cancel
+        # the incident, not just the ambulance status: restoring only the
+        # vehicle leaves a live dispatch attached to a unit the next test
+        # reads as available, and the crew picker then offers a unit that is
+        # secretly mid-trip.
+        cancelled = c.post(
+            f"{API}/incidents/{open_inc['id']}/status",
+            headers=dispatch,
+            json={"status": "cancelled"},
+        )
+        assert cancelled.status_code == 200, cancelled.text
+
 
 def test_a_unit_that_is_not_free_is_refused_until_overridden():
     """#29/#31: a hand-picked vehicle is checked exactly like the engine's own."""
@@ -3880,37 +3965,290 @@ def test_a_unit_that_is_not_free_is_refused_until_overridden():
             )
             assert forced.status_code == 200, forced.text
         finally:
+            # Cancel the forced trip BEFORE handing the unit back. The other
+            # order produces the worst possible fixture: an "available"
+            # ambulance with a live incident on it, invisible to every later
+            # test that picks the first free unit.
+            c.post(
+                f"{API}/incidents/{open_inc['id']}/status",
+                headers=dispatch,
+                json={"status": "cancelled"},
+            )
             c.post(f"{API}/ambulances/{unit['id']}/status", headers=admin, json={"status": "available"})
 
 
+def _token(c, email: str, password: str) -> str:
+    """A bare access token. Sockets take theirs as a query parameter, not a
+    header, so the header dicts the HTTP helpers return are no use here."""
+    login = c.post(f"{API}/auth/login", json={"email": email, "password": password})
+    assert login.status_code == 200, login.text
+    return login.json()["access_token"]
+
+
+def _ws_next_event(ws, want: str, max_pings: int = 2) -> dict:
+    """Read frames until `want`, stepping over heartbeats.
+
+    The server pings every 20-25 s, so an unbounded blocking receive turns a
+    quiet fixture into a hung test instead of a failure.
+    """
+    pings = 0
+    while pings <= max_pings:
+        frame = json.loads(ws.receive_text())
+        if frame.get("event") == want:
+            return frame
+        if frame.get("event") == "ping":
+            pings += 1
+    raise AssertionError(f"no {want!r} frame within {max_pings} pings")
+
+
+def _ws_drain_to_fence(ws, fence: str = "doctor.duty", max_pings: int = 2) -> list[dict]:
+    """Collect a socket's frames until a universally-visible fence event.
+
+    Publishing a delta every socket may see, after the writes under test,
+    orders the stream: once the fence arrives, everything this socket was
+    ever going to receive about those writes has already arrived. Absence is
+    then a real assertion rather than a race.
+    """
+    seen: list[dict] = []
+    pings = 0
+    while pings <= max_pings:
+        frame = json.loads(ws.receive_text())
+        if frame.get("event") == fence:
+            return seen
+        if frame.get("event") == "ping":
+            pings += 1
+            continue
+        seen.append(frame)
+    raise AssertionError(f"fence {fence!r} never arrived")
+
+
+def _ws_drain_until(ws, pred, max_pings: int = 2) -> list[dict]:
+    """Collect frames until one satisfies `pred`, inclusive.
+
+    On a socket whose event whitelist excludes every universal delta (the
+    incident feed forwards only incident and inbound events), the ordering
+    fence has to be an event the socket certainly gets: for a driver, that is
+    the dispatch of their own trip. The queue is ordered, so once it arrives,
+    everything published before it — including anything that should NOT have
+    been forwarded — has already been offered to this socket.
+    """
+    seen: list[dict] = []
+    pings = 0
+    while pings <= max_pings:
+        frame = json.loads(ws.receive_text())
+        if frame.get("event") == "ping":
+            pings += 1
+            continue
+        seen.append(frame)
+        if pred(frame):
+            return seen
+    raise AssertionError("ordering fence never arrived on this socket")
+
+
+def _duty_fence(c, admin) -> None:
+    """Toggle one clinician's duty: visible to every socket, and unlike a
+    capacity quick-adjust it publishes no other event on the way."""
+    docs = c.get(f"{API}/doctors?limit=1", headers=admin).json()["results"]
+    assert docs, "fixture needs at least one clinician"
+    doc = docs[0]
+    r = c.post(f"{API}/doctors/{doc['id']}/duty", headers=admin, json={"on_duty": not doc["on_duty"]})
+    assert r.status_code == 200, r.text
+
+
 def test_a_reroute_cannot_swap_the_crew():
-    """The vehicle carrying a patient stays with them until the trip closes."""
+    """The vehicle carrying a patient stays with them until the trip closes.
+
+    The mid-trip incident is created here rather than hoped for in the seed:
+    the old fixture skipped whenever the queue happened to be quiet, which is
+    exactly when a crew-swap bug would slip through unwatched.
+    """
     with client() as c:
         dispatch = _login(c, "dispatch@medmesh.in", "Dispatch@108")
         admin = _login(c, "admin@medmesh.in", "MedMesh@2026")
-        incidents = c.get(f"{API}/incidents?limit=30", headers=dispatch).json()["results"]
-        moving = next((i for i in incidents if i["status"] in ("en_route", "transporting")), None)
-        if moving is None:
-            import pytest
+        crew_unit = _crew_vehicle(c, admin)
+        moving = None
+        try:
+            moving = _a_crew_incident(c, dispatch, admin, ambulance_id=crew_unit["id"])
+            shortlist = c.get(
+                f"{API}/incidents/{moving['id']}/shortlist?limit=8", headers=dispatch
+            ).json()
+            other = next(
+                (
+                    r["hospital_id"]
+                    for r in shortlist["results"]
+                    if r["hospital_id"] != moving["dispatch"]["assigned_hospital_id"]
+                ),
+                None,
+            )
+            assert other is not None, "fixture needs a second reachable facility"
+            fleet = c.get(f"{API}/ambulances?limit=200", headers=admin).json()["results"]
+            spare = next(
+                (u for u in fleet if u["id"] != crew_unit["id"] and u["status"] == "available"),
+                None,
+            )
+            assert spare is not None, "fixture needs a spare unit to attempt the swap"
 
-            pytest.skip("no incident mid-trip in the fixture")
-        shortlist = c.get(f"{API}/incidents/{moving['id']}/shortlist?limit=5", headers=dispatch).json()
-        other = next(
-            (r["hospital_id"] for r in shortlist["results"] if r["hospital_id"] != moving["assigned_hospital_id"]),
-            None,
-        )
-        assert other is not None
-        fleet = c.get(f"{API}/ambulances?limit=200", headers=admin).json()["results"]
-        spare = next(
-            (u for u in fleet if u["id"] != moving.get("assigned_ambulance_id") and u["status"] == "available"),
-            None,
-        )
-        assert spare is not None
+            refused = c.post(
+                f"{API}/incidents/{moving['id']}/reroute",
+                headers=dispatch,
+                json={"hospital_id": other, "ambulance_id": spare["id"]},
+            )
+            assert refused.status_code == 409, refused.text
+            detail = refused.json()["detail"].lower()
+            assert "crew" in detail or "re-route" in detail, refused.text
+        finally:
+            if moving is not None:
+                c.post(
+                    f"{API}/incidents/{moving['id']}/status",
+                    headers=dispatch,
+                    json={"status": "cancelled"},
+                )
 
-        refused = c.post(
-            f"{API}/incidents/{moving['id']}/reroute",
-            headers=dispatch,
-            json={"hospital_id": other, "ambulance_id": spare["id"]},
-        )
-        assert refused.status_code == 409, refused.text
-        assert "re-route" in refused.json()["detail"].lower() or "crew" in refused.json()["detail"].lower()
+
+def test_a_reroute_moves_the_hold_and_keeps_the_crew():
+    """The bed goes back to the old ward's pool and the crew never changes."""
+    with client() as c:
+        dispatch = _login(c, "dispatch@medmesh.in", "Dispatch@108")
+        admin = _login(c, "admin@medmesh.in", "MedMesh@2026")
+        crew_unit = _crew_vehicle(c, admin)
+        incident_id = None
+        try:
+            moving = _a_crew_incident(c, dispatch, admin, ambulance_id=crew_unit["id"])
+            incident_id = moving["id"]
+            first = moving["dispatch"]["assigned_hospital_id"]
+            shortlist = c.get(
+                f"{API}/incidents/{incident_id}/shortlist?limit=8", headers=dispatch
+            ).json()
+            other = next(
+                (r["hospital_id"] for r in shortlist["results"] if r["hospital_id"] != first),
+                None,
+            )
+            assert other is not None
+
+            moved = c.post(
+                f"{API}/incidents/{incident_id}/reroute",
+                headers=dispatch,
+                json={"hospital_id": other, "hold_resource": "bed"},
+            )
+            assert moved.status_code == 200, moved.text
+            assert moved.json()["released_holds"] == ["bed"], moved.text
+
+            detail = c.get(f"{API}/incidents/{incident_id}", headers=dispatch).json()
+            assert detail["assigned_hospital_id"] == other
+            assert detail["assigned_ambulance_id"] == crew_unit["id"], "the crew moved on a reroute"
+            assert any(h["resource"] == "bed" for h in detail["active_holds"]), (
+                "the new ward holds nothing after the reroute"
+            )
+        finally:
+            if incident_id is not None:
+                c.post(
+                    f"{API}/incidents/{incident_id}/status",
+                    headers=dispatch,
+                    json={"status": "cancelled"},
+                )
+
+
+def test_ws_incident_feed_gives_a_driver_only_their_own_trip():
+    """The queue is not the driver's: created events never reach them, and
+    every other incident event reaches them only for the trip they carry."""
+    with client() as c:
+        dispatch = _login(c, "dispatch@medmesh.in", "Dispatch@108")
+        admin = _login(c, "admin@medmesh.in", "MedMesh@2026")
+        crew_unit = _crew_vehicle(c, admin)
+        driver_token = _token(c, "crew@medmesh.in", "Crew@108")
+        incident_id = None
+        with c.websocket_connect(f"/ws/incidents?token={driver_token}") as wsd, \
+             c.websocket_connect(f"/ws/incidents?token={_token(c, 'dispatch@medmesh.in', 'Dispatch@108')}") as wso:
+            try:
+                moving = _a_crew_incident(c, dispatch, admin, ambulance_id=crew_unit["id"])
+                incident_id = moving["id"]
+
+                # The driver's own dispatch is the fence on both sockets: it
+                # is the one later event this feed certainly forwards to them.
+                # `incident.created` carries its id under "id" (it predates the
+                # incident_id convention the later events use); accept both.
+                def own(f: dict) -> bool:
+                    data = f.get("data", {}) or {}
+                    return (data.get("incident_id") or data.get("id")) == incident_id
+
+                driver_seen = _ws_drain_until(
+                    wsd, lambda f: f.get("event") == "incident.dispatched" and own(f)
+                )
+                ops_seen = _ws_drain_until(
+                    wso, lambda f: f.get("event") == "incident.created" and own(f)
+                )
+            finally:
+                if incident_id is not None:
+                    c.post(
+                        f"{API}/incidents/{incident_id}/status",
+                        headers=dispatch,
+                        json={"status": "cancelled"},
+                    )
+
+        driver_events = [f.get("event") for f in driver_seen]
+        assert "incident.created" not in driver_events, driver_events
+        own_dispatch = [
+            f for f in driver_seen
+            if f.get("event") == "incident.dispatched"
+            and (f.get("data", {}).get("incident_id") == incident_id)
+        ]
+        assert own_dispatch, f"driver never saw their own dispatch: {driver_events}"
+        ops_events = [f.get("event") for f in ops_seen]
+        assert "incident.created" in ops_events, ops_events
+
+
+def test_ws_notification_created_reaches_only_its_addressee():
+    """A ward's inbox traffic is theirs: facility-addressed rows reach that
+    facility's admins, and nobody else's socket carries them."""
+    with client() as c:
+        dispatch = _login(c, "dispatch@medmesh.in", "Dispatch@108")
+        admin = _login(c, "admin@medmesh.in", "MedMesh@2026")
+        kgch_token = _token(c, "admin@kgch.medmesh.in", "Hospital@2026")
+        srmc_token = _token(c, "admin@srmc.medmesh.in", "Hospital@2026")
+        kgch_me = c.get(f"{API}/auth/me", headers={"Authorization": f"Bearer {kgch_token}"}).json()
+        incident_id = None
+        with c.websocket_connect(f"/ws/feed?token={kgch_token}") as wsk, \
+             c.websocket_connect(f"/ws/feed?token={srmc_token}") as wss:
+            try:
+                created = c.post(
+                    f"{API}/incidents",
+                    headers=dispatch,
+                    json={
+                        "category": "trauma_fall",
+                        "urgency": "P2",
+                        "lat": 11.0168,
+                        "lng": 76.9558,
+                        "landmark": "Socket fixture",
+                        "district_id": 1,
+                    },
+                )
+                assert created.status_code == 201, created.text
+                incident_id = created.json()["id"]
+                dispatched = c.post(
+                    f"{API}/incidents/{incident_id}/dispatch",
+                    headers=dispatch,
+                    json={"hospital_id": kgch_me["hospital_id"], "hold_resource": "bed"},
+                )
+                assert dispatched.status_code == 200, dispatched.text
+                _duty_fence(c, admin)
+
+                kgch_seen = _ws_drain_to_fence(wsk)
+                srmc_seen = _ws_drain_to_fence(wss)
+            finally:
+                if incident_id is not None:
+                    c.post(
+                        f"{API}/incidents/{incident_id}/status",
+                        headers=dispatch,
+                        json={"status": "cancelled"},
+                    )
+
+        def mine(frame: dict) -> bool:
+            data = frame.get("data", {}) or {}
+            return data.get("user_id") == kgch_me["id"] or (
+                not data.get("user_id") and data.get("hospital_id") == kgch_me["hospital_id"]
+            )
+
+        kgch_notes = [f for f in kgch_seen if f.get("event") == "notification.created" and mine(f)]
+        assert kgch_notes, f"the addressed ward saw none of its own notifications: {[f.get('event') for f in kgch_seen]}"
+        leaked = [f for f in srmc_seen if f.get("event") == "notification.created" and mine(f)]
+        assert not leaked, "a second facility's socket carried another ward's inbox traffic"

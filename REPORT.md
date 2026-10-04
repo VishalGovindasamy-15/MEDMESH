@@ -7,8 +7,8 @@
 | Backend | Python 3.13 · FastAPI · SQLAlchemy 2.0 · SQLite/WAL (Postgres-ready) |
 | Frontend | React Native 0.86 / Expo SDK 57 · expo-router · one codebase, web + iOS + Android |
 | Coverage | 38 districts · 152 facilities · 1,069 clinicians · 66 ambulances |
-| Code | 15,192 backend Python · 20,729 frontend TS/TSX · 3,916 lines of tests · 2,434 lines of browser harness |
-| Verified | 84 API tests passing · 9 browser harnesses · 32 route × viewport sweeps · 12 surfaces × 3 phone widths + Tamil · Google Maps suite · clean typecheck |
+| Code | 15,347 backend Python · 20,770 frontend TS/TSX · 4,320 lines of tests · 2,853 lines of browser harness |
+| Verified | 89 API tests passing · 10 browser harnesses · 32 route × viewport sweeps · 12 surfaces × 3 phone widths + Tamil · Google Maps suite · clean typecheck |
 | Repository | local git, 226 tracked files — push URL pending from you |
 
 ---
@@ -266,7 +266,17 @@ It is now authenticated and role-scoped, the SLA report is operations-only, and
 both CSVs carry the officer's jurisdiction; the district export button downloads
 the file with the token attached instead of opening a tab containing the API's
 401 body. It was also broken: the incident CSV had been raising `NameError` since
-the split-interval columns landed, which nothing had ever pressed.
+the split-interval columns landed, which nothing had ever pressed. The fourth
+audit went one step further and *read* a live download: 39 of 189 rows carried
+an empty destination-name column, because the hospital-name lookup was filtered
+by the officer's jurisdiction while the incident filter is where jurisdiction
+belongs — a cross-district transfer, exactly the case policy review reads the
+file for, lost its destination's name. The lookup is now unfiltered (the
+officer already holds the hospital id, and the public directory publishes every
+name anonymously), and a regression test seeds a transfer over the line. The
+incident export also had no UI path at all: the analytics screen now offers
+"Export incidents" beside "Export capacity", and the surface harness presses
+both and requires files.
 
 Also from the same pass: one incident-visibility rule replacing per-endpoint
 guesses about who may read a case; flat `assigned_hospital_id` /
@@ -433,10 +443,54 @@ build, and both documents were corrected to match the code — the checklist's
 picker rows now say what `probe-pickers` actually asserts, and this section
 exists because the previous ones described a product that was one audit behind.
 
+### The fourth audit — a verification-first pass
+
+The fourth audit asked for the current revision to be *run*, its real failures
+captured, and code changed only where a test demonstrated a problem; and for
+the multi-user items to be proved with separate sessions against one backend
+process, four outcomes recorded per scenario — the backend's response, the
+stored state, the initiator's screen, and every other affected user's screen —
+any disagreement a failure.
+
+The backend half landed first: live WebSocket deltas are now scoped per role
+and per relationship (a driver receives events for the trip carrying them,
+resolved by a per-event join so a re-crew mid-connection changes what they
+see; a ward receives its own facility-addressed rows; unknown event kinds fail
+closed to operations), and a re-route notifies both ends — the new destination
+gets the prep alert a fresh dispatch would send, the bypassed ward a durable
+"no longer inbound" row. The suite grew from 84-plus-a-skip to 89 passing with
+no skips, and the two new socket tests were verified to fail against the old
+pass-through filter.
+
+The browser half is a tenth harness, `probe-multiuser.mjs`, which signs six
+sessions in through the real form and walks the audit's scenarios: dispatch
+creation with an explicitly chosen NICU crew and a bed hold (driver and ward
+see it without refresh); a decline that releases the hold, leaves the eligible
+set and withdraws the destination on the dispatcher's untouched screen; a
+two-leg re-route that moves the hold, tells the bypassed ward and follows both
+legs on the driver's screen while the crew never changes; two dispatchers
+racing for the last free unit, where exactly one commit wins and the loser is
+told plainly; an offline intake that fails honestly and then succeeds exactly
+once under a double-click; and a gov session downloading both CSVs. It runs
+with the demo control room switched off, because a simulator that commits
+incidents within seconds would race every assertion.
+
+The probe earned its keep immediately, catching two defects in the product
+rather than in the tests. The hold picker on the dispatch console — "Reserve
+on dispatch" — rendered its label and its explanation with no clickable control
+between them at desktop widths: the scroll variant of the segmented control
+capped its main axis with `flexBasis: 0`, which is the width inside a row
+parent and the *height* inside a column one, so the control collapsed to a
+sliver and a dispatcher could not take a bed hold through the interface at
+all. And the analytics header, given a third action button, overflowed a
+360 px phone because a flex child's shrink defaults to zero and the row's own
+wrap never received a narrower box. Both are fixed and covered — the first by
+a click test, the second by the width harness that caught it.
+
 ## 6. Verification
 
 ```bash
-cd backend  && python3 -m pytest tests -q            # 84 passed, 1 skipped
+cd backend  && python3 -m pytest tests -q            # 89 passed, 0 skipped
 cd mobile   && npx tsc --noEmit                      # clean
 cd tools/qa && node sweep.mjs                        # 32 route × viewport, 0 problems
 cd tools/qa && node surfaces.mjs                     # all surfaces verified
@@ -447,6 +501,8 @@ cd tools/qa && node probe-inbox-shell.mjs            # inbox and shell verified
 cd tools/qa && node probe-pickers.mjs                # pickers + 108 location sources verified
 cd tools/qa && node probe-crew-lifecycle.mjs         # crew lifecycle verified (refresh at every stage)
 cd tools/qa && node probe-mobile-widths.mjs          # all width checks passed (360/390/430 + Tamil)
+MEDMESH_SIMULATOR_ENABLED=false … uvicorn …          # demo control room off, then:
+cd tools/qa && node probe-multiuser.mjs              # six sessions, one backend, four outcomes per scenario
 ./tools/package-release.sh                           # source-only archive, or refuses
 ```
 
