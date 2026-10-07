@@ -1,4 +1,5 @@
 import { Stack } from 'expo-router';
+import Head from 'expo-router/head';
 import { StatusBar } from 'expo-status-bar';
 import React from 'react';
 import { Platform, View } from 'react-native';
@@ -30,6 +31,19 @@ function usePinnedRootOnWeb() {
   }, []);
 }
 
+function useServiceWorkerOnWeb() {
+  React.useEffect(() => {
+    if (Platform.OS === 'web' && 'serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('/service-worker.js')
+          .catch((error) => {
+            console.log('PWA Service Worker registration failed:', error);
+          });
+      });
+    }
+  }, []);
+}
+
 /**
  * Root layout.
  *
@@ -40,8 +54,13 @@ function usePinnedRootOnWeb() {
  */
 export default function RootLayout() {
   usePinnedRootOnWeb();
+  useServiceWorkerOnWeb();
   return (
     <SafeAreaProvider>
+      <Head>
+        <link rel="manifest" href="/manifest.json" />
+        <link rel="apple-touch-icon" href="/android-icon-192x192.png" />
+      </Head>
       <ThemeProvider>
         <AuthProvider>
           <SessionGate>

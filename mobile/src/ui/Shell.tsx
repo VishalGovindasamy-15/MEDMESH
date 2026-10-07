@@ -4,6 +4,7 @@ import { Platform, Pressable, ScrollView, StyleSheet, View, Image } from 'react-
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import type { Role, SessionUser } from '../api/types';
+import { api } from '../api/client';
 import { ageFromSeconds } from '../lib/format';
 import { useAuth } from '../state/AuthProvider';
 import { useLive } from '../state/LiveProvider';
@@ -101,7 +102,7 @@ export function AppShell({
           paddingBottom: 0,
         }}
       >
-        <DemoStrip />
+        
         <PageHeader
           title={title}
           subtitle={subtitle}
@@ -125,7 +126,7 @@ export function AppShell({
 
   if (!isDesktop) {
     return (
-      <View style={{ flex: 1, minHeight: 0, backgroundColor: t.bg.app }}>
+      <View style={{ flex: 1, minHeight: 0, backgroundColor: t.bg.app, paddingTop: insets.top }}>
         {/* minHeight: 0 is load-bearing on web. A flex item defaults to
             min-height: auto, so without it the ScrollView refuses to shrink
             below its content, the document outgrows the viewport, and the whole
@@ -268,16 +269,27 @@ function DemoStrip() {
 
   useEffect(() => {
     let cancelled = false;
-    fetch('/api/v1/status')
-      .then((r) => (r.ok ? r.json() : null))
-      .then((body) => !cancelled && body && setDemo(Boolean(body.demo_mode)))
-      .catch(() => !cancelled && setDemo(false));
+
+    api
+      .get<{ demo_mode?: boolean }>('/status')
+      .then((body) => {
+        if (!cancelled && body) {
+          setDemo(Boolean(body.demo_mode));
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setDemo(false);
+        }
+      });
+
     return () => {
       cancelled = true;
     };
   }, []);
 
   if (!demo) return null;
+
   return (
     <View
       style={{
@@ -294,12 +306,21 @@ function DemoStrip() {
       accessibilityRole="summary"
     >
       <Icon name="alert" size={13} color={t.status.warm.base} />
-      <Small style={{ fontSize: 11.5, color: t.status.warm.base, fontWeight: '600' }}>
+
+      <Small
+        style={{
+          fontSize: 11.5,
+          color: t.status.warm.base,
+          fontWeight: '600',
+        }}
+      >
         Pilot dataset
       </Small>
+
       <Small muted style={{ fontSize: 11.5, flexShrink: 1 }}>
-        Facility figures on this deployment are simulated for demonstration. No record here describes a real
-        patient or a real hospital's live capacity.
+        Facility figures on this deployment are simulated for demonstration.
+        No record here describes a real patient or a real hospital's live
+        capacity.
       </Small>
     </View>
   );

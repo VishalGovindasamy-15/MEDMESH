@@ -553,12 +553,20 @@ export default function IncidentWorkspace() {
               {incident.assigned_ambulance && incident.assigned_hospital ? (
                 <>
                   <MapSurface
-                    points={[{
-                      lat: incident.assigned_hospital.lat,
-                      lng: incident.assigned_hospital.lng,
-                      id: incident.assigned_hospital.id,
-                      color: t.bg.accent
-                    }]}
+                    points={[
+                      {
+                        lat: incident.assigned_hospital.lat,
+                        lng: incident.assigned_hospital.lng,
+                        id: incident.assigned_hospital.id,
+                        short_name: incident.assigned_hospital.short_name,
+                        name: incident.assigned_hospital.name,
+                        pin_override: {
+                          fill: t.accent.base,
+                          ring: t.accent.base,
+                          label: 'Assigned hospital',
+                        },
+                      },
+                    ]}
                     center={{
                       lat: incident.assigned_hospital.lat,
                       lng: incident.assigned_hospital.lng,
@@ -591,7 +599,10 @@ export default function IncidentWorkspace() {
                       onPress={() =>
                         Linking.openURL(
                           navigationUrl(
-                            { lat: incident.assigned_hospital!.lat, lng: incident.assigned_hospital!.lng },
+                            {
+                              lat: incident.assigned_hospital!.lat,
+                              lng: incident.assigned_hospital!.lng,
+                            },
                             incident.assigned_hospital!.short_name,
                             incident.assigned_ambulance
                               ? {

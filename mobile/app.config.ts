@@ -88,6 +88,10 @@ const config: ExpoConfig = {
     favicon: './assets/favicon.png',
     bundler: 'metro',
     output: 'single',
+    shortName: 'MedMesh',
+    themeColor: '#1A2942',
+    backgroundColor: '#F5F7FA',
+    display: 'standalone',
   },
 
   plugins: [

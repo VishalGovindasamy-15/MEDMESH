@@ -886,3 +886,8 @@ function EditVehicle({
 
 /** Re-exported so the accounts screen can label the vehicle picker identically. */
 export { CAPABILITIES };
+
+// expo-router requires a default export from every file in the app/ directory.
+// FleetPanel is used as a component inside admin/index.tsx, not as a standalone
+// route, so we re-export it here to satisfy the bundler without creating a route.
+export default FleetPanel;

@@ -1,6 +1,7 @@
 import { useRouter } from 'expo-router';
 import React, { useEffect, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, View, Image } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { api } from '../src/api/client';
 import type { DemoAccountsPayload } from '../src/api/types';
@@ -77,6 +78,7 @@ export default function SignInScreen() {
   const router = useRouter();
   const { signIn, register, signingIn, error, user, clearError } = useAuth();
   const { isDesktop } = useResponsive();
+  const insets = useSafeAreaInsets();
 
   const [mode, setMode] = useState<Mode>('sign-in');
   const [email, setEmail] = useState('');
@@ -184,7 +186,7 @@ export default function SignInScreen() {
   };
 
   return (
-    <ScrollView contentContainerStyle={{ flexGrow: 1, backgroundColor: t.bg.app }}>
+    <ScrollView contentContainerStyle={{ flexGrow: 1, backgroundColor: t.bg.app, paddingTop: insets.top }}>
       <View
         style={{
           flex: 1,

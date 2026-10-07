@@ -342,7 +342,6 @@ export default function DirectoryScreen() {
         </Row>
       }
 
-      scroll={false}
     >
       <ScrollView
         contentContainerStyle={{ gap: space.lg }}
