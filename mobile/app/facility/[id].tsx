@@ -208,18 +208,7 @@ export default function FacilityScreen() {
                 <MiniStats data={sparkIcu} label="ICU" />
               </Row>
             </Stack>
-            <Stack gap="xs" style={{ flex: 1, minWidth: 160 }}>
-              <Label>Blood & stock</Label>
-              <KeyValue label="Blood units" dense>
-                <Num size={13}>{capacity.blood_units}</Num>
-              </KeyValue>
-              <KeyValue label="Antivenom vials" dense>
-                <Num size={13}>{capacity.antivenom_vials}</Num>
-              </KeyValue>
-              <KeyValue label="Records (24 h)" dense last>
-                <Num size={13}>{detail.history.length}</Num>
-              </KeyValue>
-            </Stack>
+
           </Row>
         </Card>
 

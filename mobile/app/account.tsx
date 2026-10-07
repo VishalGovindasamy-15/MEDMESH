@@ -178,18 +178,7 @@ export default function AccountScreen() {
             </Num>
           </KeyValue>
           <Divider />
-          <Small muted style={{ fontSize: 11.5 }}>
-            Set <Num size={11.5}>EXPO_PUBLIC_API_URL</Num> to point the app at a non-default backend. Resolved base is{' '}
-            <Num size={11.5}>{BASE_URL}</Num>.
-          </Small>
         </Card>
-
-        <Banner
-          tone="neutral"
-          icon="info"
-          title="Pilot build limitations"
-          body="Tokens are stored in AsyncStorage, not the device keychain, and there is no rate limiting or MFA. Both are tracked for the hardening phase before any production roll-out."
-        />
 
         <Row gap="sm" wrap>
           <Button label={`Go to ${homeFor(user.role).replace('/', '') || 'directory'}`} icon="chevronRight" onPress={() => router.push(homeFor(user.role) as any)} />

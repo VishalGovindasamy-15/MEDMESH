@@ -1,6 +1,6 @@
 import { useRouter } from 'expo-router';
 import React, { useEffect, useState } from 'react';
-import { Pressable, ScrollView, StyleSheet, View } from 'react-native';
+import { Pressable, ScrollView, StyleSheet, View, Image } from 'react-native';
 
 import { api } from '../src/api/client';
 import type { DemoAccountsPayload } from '../src/api/types';
@@ -89,6 +89,9 @@ export default function SignInScreen() {
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [demo, setDemo] = useState<DemoAccountsPayload | null>(null);
+  
+  const [showSettings, setShowSettings] = useState(false);
+  const [customUrl, setCustomUrl] = useState(require('../src/api/client').BASE_URL);
 
   useEffect(() => {
     if (user) router.replace(homeFor(user.role) as any);
@@ -196,22 +199,35 @@ export default function SignInScreen() {
               onPress={() => router.push('/')}
               style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}
             >
-              <View
-                style={{
-                  width: 30,
-                  height: 30,
-                  borderRadius: radius.md,
-                  backgroundColor: t.accent.base,
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                }}
-              >
-                <Icon name="pulse" size={17} color={t.accent.on} strokeWidth={2.2} />
-              </View>
+              <Image source={require('../assets/logo.png')} style={{ width: 30, height: 30 }} resizeMode="contain" />
               <Body style={{ fontWeight: '600' }}>MedMesh</Body>
             </Pressable>
-            <Button label="Public directory" icon="hospital" size="sm" onPress={() => router.push('/')} />
+            <Row gap="sm">
+              <Button label="API Settings" icon="settings" size="sm" variant="secondary" onPress={() => setShowSettings(!showSettings)} />
+              <Button label="Public directory" icon="hospital" size="sm" onPress={() => router.push('/')} />
+            </Row>
           </Row>
+
+          {showSettings && (
+            <Card style={{ gap: space.md, backgroundColor: t.bg.sunken }}>
+              <Heading>API Settings</Heading>
+              <TextField
+                value={customUrl}
+                onChangeText={setCustomUrl}
+                label="Frontend Base URL"
+              />
+              <Row gap="sm">
+                <Button label="Save" variant="primary" onPress={() => {
+                  require('../src/api/client').setBaseUrl(customUrl);
+                  setShowSettings(false);
+                }} />
+                <Button label="Reset to default" variant="secondary" onPress={() => {
+                  require('../src/api/client').setBaseUrl(null);
+                  setCustomUrl(require('../src/api/client').BASE_URL);
+                }} />
+              </Row>
+            </Card>
+          )}
 
           <Row gap="lg" align="flex-start" style={{ flexWrap: 'wrap' }}>
             {/* Credentials ------------------------------------------------- */}
@@ -502,15 +518,7 @@ export default function SignInScreen() {
             </Card>
           </Row>
 
-          <Row gap="sm" align="center" justify="center" style={{ paddingTop: space.sm }}>
-            <Pill label="pilot build" tone="warm" compact />
-            <Num size={11} color={t.fg.faint} weight="500">
-              v1.0.0
-            </Num>
-            <Small muted style={{ fontSize: 11 }}>
-              Synthetic data — no real facility figures
-            </Small>
-          </Row>
+
         </View>
       </View>
     </ScrollView>

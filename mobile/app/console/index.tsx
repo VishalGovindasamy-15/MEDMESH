@@ -353,7 +353,7 @@ export default function ConsoleScreen() {
   ).length;
 
   const composer = (
-    <Card style={{ gap: space.md }}>
+    <Card style={{ gap: space.lg }}>
       <Row justify="space-between" align="center">
         <Stack gap="xxs">
           <Heading>New incident</Heading>
@@ -493,7 +493,7 @@ export default function ConsoleScreen() {
           flexDirection: 'row',
           alignItems: 'center',
           justifyContent: 'space-between',
-          gap: space.sm,
+          gap: space.lg,
           paddingHorizontal: space.md,
           paddingVertical: 10,
           borderRadius: radius.md,
@@ -677,14 +677,14 @@ export default function ConsoleScreen() {
           />
         )
       }
-      footerNote="Incident records contain no patient identifiers, by construction: every clinical field is a closed set of observations, so there is no field for a name, age or contact number to be typed into. The landmark is the only free text and is validated as a place."
+
       scroll={false}
     >
       {!isDesktop && composerOpen ? (
         <ScrollView contentContainerStyle={{ padding: 12, gap: 12 }}>{composer}</ScrollView>
       ) : (
         <ScrollView
-          contentContainerStyle={{ paddingBottom: space.xxxl, gap: space.lg }}
+          contentContainerStyle={{ gap: space.lg }}
           refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => load()} />}
         >
           {error ? <Banner tone="critical" icon="alert" title="Queue unavailable" body={error} /> : null}
@@ -733,7 +733,7 @@ export default function ConsoleScreen() {
             <Stack gap="lg" style={{ flex: 1, minWidth: isDesktop ? 340 : '100%' }}>
               {isDesktop ? composer : null}
 
-              <Card style={{ gap: space.md }}>
+              <Card style={{ gap: space.lg }}>
                 <SectionHeader
                   label="Fleet"
                   action={
@@ -871,8 +871,8 @@ function IncidentCard({ incident, onPress }: { incident: Incident; onPress: () =
         borderRadius: radius.lg,
         borderWidth: StyleSheet.hairlineWidth,
         borderColor: isOpen ? `${t.status.critical.base}55` : t.line.base,
-        padding: space.lg,
-        gap: space.sm,
+        padding: 12,
+        gap: space.lg,
         opacity: pressed ? 0.85 : 1,
       })}
     >

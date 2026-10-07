@@ -1,150 +1,121 @@
-import React from 'react';
-import { StyleSheet, View } from 'react-native';
-import MapView, { Marker, Polyline, PROVIDER_GOOGLE } from 'react-native-maps';
-
-import type { MapPoint } from './mapTypes';
-import { pinFill, pinOpacity } from './mapTypes';
+import React, { useRef, useEffect } from 'react';
+import { View } from 'react-native';
+import WebView from 'react-native-webview';
 import { useTheme } from '../theme/ThemeProvider';
-import { radius } from '../theme/tokens';
-import { DEFAULT_CENTER, DEFAULT_ZOOM } from '../lib/maps';
-
-/**
- * Google Maps basemap — Android and iOS.
- *
- * `PROVIDER_GOOGLE` is passed explicitly. On Android that is the only provider
- * and it is what the APK ships; on iOS it forces Google tiles rather than
- * Apple's, so a dispatch console and a crew phone show the same basemap and the
- * same road names — which matters when two people are describing the same
- * junction on a call.
- *
- * Coordinates are kept in `{ latitude, longitude }` at this boundary and
- * converted from the app's `{ lat, lng }` in one place, so a mix-up cannot
- * propagate inward.
- */
-
-export interface GoogleMapProps {
-  points?: MapPoint[];
-  center?: { lat: number; lng: number };
-  zoom?: number;
-  height?: number;
-  selectedId?: number | null;
-  onSelect?: (id: number) => void;
-  origin?: { lat: number; lng: number } | null;
-  originLabel?: string;
-  routePath?: [number, number][];
-  routeTone?: 'accent' | 'live' | 'warm';
-  interactive?: boolean;
-  /** Tap-to-place: the geographic point under a long press. */
-  onPress?: (point: { lat: number; lng: number }) => void;
-}
-
-function toLatLng(p: { lat: number; lng: number }) {
-  return { latitude: p.lat, longitude: p.lng };
-}
-
-/** Zoom → latitudeDelta, good enough for the fixed-height map cards used here. */
-function deltaForZoom(zoom: number) {
-  return 360 / Math.pow(2, zoom);
-}
+import type { GoogleMapProps } from './GoogleMap.web';
 
 export function GoogleMap({
   points = [],
   center,
-  zoom = DEFAULT_ZOOM,
+  zoom = 10,
   height = 300,
   selectedId = null,
   onSelect,
   origin = null,
   originLabel = 'Scene',
   routePath,
-  routeTone = 'accent',
-  interactive = true,
-  onPress,
 }: GoogleMapProps) {
   const { t } = useTheme();
-  const camera = center ?? DEFAULT_CENTER;
-  const delta = deltaForZoom(zoom);
+  const webviewRef = useRef<any>(null);
+
+  const defaultCenter = center || { lat: 10.9615, lng: 78.0807 };
+  
+  const polylinePositions = routePath ? routePath.map(p => [p[1], p[0]]) : [];
+
+  const html = `
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+      <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+      <style>
+        body { padding: 0; margin: 0; }
+        #map { height: 100vh; width: 100vw; }
+        .custom-marker {
+          border-radius: 50%;
+          border: 2px solid white;
+          box-shadow: 0 0 4px rgba(0,0,0,0.5);
+        }
+      </style>
+    </head>
+    <body>
+      <div id="map"></div>
+      <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+      <script>
+        const map = L.map('map', { zoomControl: false }).setView([${defaultCenter.lat}, ${defaultCenter.lng}], ${zoom});
+        L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+          attribution: '&copy; OpenStreetMap contributors'
+        }).addTo(map);
+
+        const markers = [];
+
+        function createIcon(color, isSelected) {
+          return L.divIcon({
+            className: 'custom-marker',
+            html: '<div style="background-color: ' + color + '; width: 100%; height: 100%; border-radius: 50%;"></div>',
+            iconSize: isSelected ? [24, 24] : [16, 16],
+            iconAnchor: isSelected ? [12, 12] : [8, 8]
+          });
+        }
+
+        const points = ${JSON.stringify(points)};
+        const selectedId = ${selectedId !== null ? selectedId : 'null'};
+        const colors = {
+          live: '${t.status.live.base}',
+          warm: '${t.status.warm.base}',
+          critical: '${t.status.critical.base}',
+          muted: '${t.fg.muted}',
+          accent: '${t.accent.base}'
+        };
+
+        points.forEach(p => {
+          const isSelected = p.id === selectedId;
+          const color = colors[p.tone] || colors.muted;
+          const marker = L.marker([p.lat, p.lng], { icon: createIcon(color, isSelected) }).addTo(map);
+          marker.bindPopup(p.label);
+          marker.on('click', () => {
+            window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'select', id: p.id }));
+          });
+          markers.push(marker);
+        });
+
+        if (points.length > 0) {
+          const bounds = L.latLngBounds(points.map(p => [p.lat, p.lng]));
+          map.fitBounds(bounds, { padding: [20, 20], maxZoom: 12 });
+        }
+
+        const origin = ${origin ? JSON.stringify(origin) : 'null'};
+        if (origin) {
+          const oMarker = L.marker([origin.lat, origin.lng], { icon: createIcon(colors.accent, false) }).addTo(map);
+          oMarker.bindPopup('${originLabel}');
+        }
+
+        const routePath = ${JSON.stringify(polylinePositions)};
+        if (routePath.length > 0) {
+          L.polyline(routePath, { color: colors.accent, weight: 4, opacity: 0.8 }).addTo(map);
+        }
+      </script>
+    </body>
+    </html>
+  `;
 
   return (
-    <View style={{ height, borderRadius: radius.lg, overflow: 'hidden' }}>
-      <MapView
-        onLongPress={
-          onPress
-            ? (e: any) => {
-                const c = e?.nativeEvent?.coordinate;
-                if (c && typeof c.latitude === 'number') onPress({ lat: c.latitude, lng: c.longitude });
-              }
-            : undefined
-        }
-        provider={PROVIDER_GOOGLE}
-        style={StyleSheet.absoluteFill}
-        initialRegion={{
-          latitude: camera.lat,
-          longitude: camera.lng,
-          latitudeDelta: delta,
-          longitudeDelta: delta,
+    <View style={{ height, width: '100%', borderRadius: 12, overflow: 'hidden' }}>
+      {/* @ts-ignore */}
+      <WebView
+        ref={webviewRef}
+        style={{ flex: 1 }}
+        source={{ html }}
+        scrollEnabled={false}
+        onMessage={(event: any) => {
+          try {
+            const data = JSON.parse(event.nativeEvent.data);
+            if (data.type === 'select' && onSelect) {
+              onSelect(data.id);
+            }
+          } catch (e) {}
         }}
-        region={
-          center
-            ? {
-                latitude: camera.lat,
-                longitude: camera.lng,
-                latitudeDelta: delta,
-                longitudeDelta: delta,
-              }
-            : undefined
-        }
-        scrollEnabled={interactive}
-        zoomEnabled={interactive}
-        rotateEnabled={false}
-        pitchEnabled={false}
-        toolbarEnabled={false}
-        showsUserLocation={false}
-        showsMyLocationButton={false}
-        showsPointsOfInterests={false}
-        showsCompass={interactive}
-        // Kept in step with the web basemap style so the two surfaces read alike.
-        customMapStyle={QUIET_BASEMAP}
-      >
-        {points.map((f) => (
-          <Marker
-            key={f.id}
-            coordinate={toLatLng(f)}
-            title={f.short_name}
-            description={f.name}
-            onPress={() => onSelect?.(f.id)}
-            pinColor={pinFill(f)}
-            opacity={pinOpacity(f)}
-            zIndex={f.id === selectedId ? 999 : 1}
-          />
-        ))}
-
-        {origin ? (
-          <Marker
-            coordinate={toLatLng(origin)}
-            title={originLabel}
-            pinColor={t.accent.base}
-            zIndex={1000}
-          />
-        ) : null}
-
-        {routePath && routePath.length > 1 ? (
-          <Polyline
-            coordinates={routePath.map(([lng, lat]) => ({ latitude: lat, longitude: lng }))}
-            strokeColor={routeTone === 'accent' ? t.accent.base : t.status[routeTone].base}
-            strokeWidth={4}
-          />
-        ) : null}
-      </MapView>
+      />
     </View>
   );
 }
-
-const QUIET_BASEMAP = [
-  { elementType: 'geometry', stylers: [{ saturation: -70 }, { lightness: 12 }] },
-  { elementType: 'labels.icon', stylers: [{ visibility: 'off' }] },
-  { featureType: 'poi', stylers: [{ visibility: 'off' }] },
-  { featureType: 'transit', stylers: [{ visibility: 'off' }] },
-  { featureType: 'road', elementType: 'geometry', stylers: [{ lightness: 32 }] },
-  { featureType: 'water', elementType: 'geometry', stylers: [{ color: '#cfd8e3' }] },
-];

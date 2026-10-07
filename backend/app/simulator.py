@@ -785,7 +785,7 @@ async def start_background_loops() -> list[asyncio.Task]:
 DEMO_TARGET_OPEN = 3
 
 #: Probability of creating one per tick, so the board does not fill instantly.
-DEMO_INTAKE_CHANCE = 0.55
+DEMO_INTAKE_CHANCE = 0.15
 
 #: Landmarks worth dispatching to, by category, with the district code they sit
 #: in. Real places, because the map draws them and a crew reads them out.

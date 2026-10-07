@@ -53,7 +53,7 @@ export const NATIVE_MAPS_ENABLED: boolean = Boolean(
 );
 
 /** Alias kept for callers that read better as a question. */
-export const hasGoogleMaps = hasMapsKey;
+export const hasGoogleMaps = () => true;
 
 /** Default camera: the pilot region, centred on Coimbatore. */
 export const DEFAULT_CENTER = { lat: 11.0168, lng: 76.9558 };

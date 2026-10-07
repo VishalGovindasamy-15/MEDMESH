@@ -33,6 +33,7 @@ import {
   Segmented,
   Small,
   Stack,
+  TextField,
   Title,
   TrustChip,
 } from '../../src/ui';
@@ -70,6 +71,8 @@ export default function IncidentWorkspace() {
   const [selected, setSelected] = useState<number | null>(null);
   const [holdResource, setHoldResource] = useState<'icu' | 'bed' | 'ventilator' | 'none'>('none');
   const [showRejected, setShowRejected] = useState(false);
+  const [hospitalSearch, setHospitalSearch] = useState('');
+  const [ambulanceSearch, setAmbulanceSearch] = useState('');
   const [refreshing, setRefreshing] = useState(false);
   const [tick, setTick] = useState(0);
   // Crew selection. Null means "the engine picks", which stays the default:
@@ -147,8 +150,14 @@ export default function IncidentWorkspace() {
     return () => clearInterval(id);
   }, [load]);
 
-  const eligible = useMemo(() => shortlist.filter((c) => c.eligible), [shortlist]);
-  const rejected = useMemo(() => shortlist.filter((c) => !c.eligible), [shortlist]);
+  const filteredShortlist = useMemo(() => {
+    if (!hospitalSearch.trim()) return shortlist;
+    const q = hospitalSearch.toLowerCase();
+    return shortlist.filter((c) => c.name.toLowerCase().includes(q) || c.short_name.toLowerCase().includes(q));
+  }, [shortlist, hospitalSearch]);
+
+  const eligible = useMemo(() => filteredShortlist.filter((c) => c.eligible), [filteredShortlist]);
+  const rejected = useMemo(() => filteredShortlist.filter((c) => !c.eligible), [filteredShortlist]);
   const chosen = useMemo(() => shortlist.find((c) => c.hospital_id === selected) ?? null, [shortlist, selected]);
 
   /**
@@ -164,6 +173,11 @@ export default function IncidentWorkspace() {
     const wanted: string[] = incident?.requires.ambulance ?? [];
     const scene = { lat: incident?.lat ?? 0, lng: incident?.lng ?? 0 };
     return (crew?.results ?? [])
+      .filter((unit) => {
+        if (!ambulanceSearch.trim()) return true;
+        const q = ambulanceSearch.toLowerCase();
+        return unit.call_sign.toLowerCase().includes(q) || (unit.capability && unit.capability.toLowerCase().includes(q));
+      })
       .map((unit) => {
         const caps = unit.capabilities?.length ? unit.capabilities : [unit.capability];
         const wantedIndex = wanted.findIndex((w) => caps.includes(w));
@@ -378,11 +392,10 @@ export default function IncidentWorkspace() {
           <Button label="Re-run match" icon="refresh" size="sm" onPress={() => load()} />
         </Row>
       }
-      footerNote="Matching is re-evaluated every 20 seconds while this screen is open. A facility that filled up after the shortlist was generated will be blocked at dispatch time."
       scroll={false}
     >
       <ScrollView
-        contentContainerStyle={{ paddingBottom: space.xxxl, gap: space.lg }}
+        contentContainerStyle={{ gap: space.lg }}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => load()} />}
       >
         {error ? <Banner tone="critical" icon="alert" title="Action failed" body={error} /> : null}
@@ -434,7 +447,7 @@ export default function IncidentWorkspace() {
         ) : null}
 
         {/* Call summary ------------------------------------------------ */}
-        <Card style={{ gap: space.md }}>
+        <Card style={{ gap: space.lg }}>
           <Row justify="space-between" align="flex-start" gap="md" style={{ flexWrap: 'wrap' }}>
             <Stack gap="xs" style={{ flex: 1, minWidth: 240 }}>
               <Row gap="sm" align="center" wrap>
@@ -506,11 +519,11 @@ export default function IncidentWorkspace() {
                       // would ever set on a crew's behalf. The full ladder is
                       // the crew's job; these are for reading a stage out loud
                       // on a phone call.
-                      { key: 'en_route', label: 'En route' },
+                      { key: 'en_route', label: 'Accept and go' },
                       { key: 'at_scene', label: 'At scene' },
                       { key: 'patient_onboard', label: 'On board' },
                       { key: 'transporting', label: 'Transporting' },
-                      { key: 'at_hospital', label: 'At hospital' },
+                      { key: 'at_hospital', label: 'Reached' },
                       { key: 'handed_over', label: 'Handed over' },
                     ].map((s) => (
                       <Button
@@ -540,7 +553,12 @@ export default function IncidentWorkspace() {
               {incident.assigned_ambulance && incident.assigned_hospital ? (
                 <>
                   <MapSurface
-                    points={shortlistPoints}
+                    points={[{
+                      lat: incident.assigned_hospital.lat,
+                      lng: incident.assigned_hospital.lng,
+                      id: incident.assigned_hospital.id,
+                      color: t.bg.accent
+                    }]}
                     center={{
                       lat: incident.assigned_hospital.lat,
                       lng: incident.assigned_hospital.lng,
@@ -611,6 +629,13 @@ export default function IncidentWorkspace() {
               />
             </Row>
 
+            <TextField
+              value={hospitalSearch}
+              onChangeText={setHospitalSearch}
+              placeholder="Search hospital..."
+              icon="search"
+            />
+
             {/* How this ranking was computed.
                 The engine scores proximity on road drive time, resolved before
                 anything is ranked, so the order and the map never disagree. When
@@ -670,7 +695,7 @@ export default function IncidentWorkspace() {
 
           {/* Commit panel ---------------------------------------------- */}
           <Stack gap="lg" style={{ flex: 1, minWidth: isDesktop ? 340 : '100%' }}>
-            <Card style={{ gap: space.md }}>
+            <Card style={{ gap: space.lg }}>
               <Heading>{isDispatched ? 'Re-route' : 'Commit the placement'}</Heading>
 
               {chosen ? (
@@ -767,7 +792,7 @@ export default function IncidentWorkspace() {
                           borderColor: t.line.base,
                           borderRadius: radius.md,
                           backgroundColor: t.bg.sunken,
-                          padding: space.sm,
+                          padding: space.lg,
                           gap: 4,
                         }}
                       >
@@ -867,6 +892,13 @@ export default function IncidentWorkspace() {
                             {crewChoice === null ? <Icon name="check" size={13} color={t.accent.base} /> : null}
                           </Row>
                         </Pressable>
+
+                        <TextField
+                          value={ambulanceSearch}
+                          onChangeText={setAmbulanceSearch}
+                          placeholder="Search ambulance..."
+                          icon="search"
+                        />
 
                         {crewOptions.slice(0, 12).map((option) => {
                           const isSelected = crewChoice === option.unit.id;
@@ -984,7 +1016,7 @@ export default function IncidentWorkspace() {
               )}
             </Card>
 
-            <Card style={{ gap: space.sm }}>
+            <Card style={{ gap: space.lg }}>
               <SectionHeader label="Call record" />
               <KeyValue label="Reference" dense>
                 <Num size={12.5}>{incident.reference}</Num>
@@ -1167,7 +1199,7 @@ function CandidateRow({
         borderWidth: selected ? 1.4 : StyleSheet.hairlineWidth,
         borderColor: selected ? t.accent.base : candidate.eligible ? t.line.base : `${t.status.stale.base}44`,
         padding: space.lg,
-        gap: space.sm,
+        gap: space.lg,
         opacity: candidate.eligible ? 1 : 0.82,
       }}
     >

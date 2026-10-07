@@ -22,6 +22,8 @@ engine = create_engine(
     echo=settings.sql_echo,
     pool_pre_ping=True,
     connect_args=_connect_args,
+    pool_size=30,
+    max_overflow=30,
 )
 
 if settings.database_url.startswith("sqlite"):

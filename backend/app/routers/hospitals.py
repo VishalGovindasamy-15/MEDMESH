@@ -60,7 +60,7 @@ router = APIRouter(prefix="/hospitals", tags=["hospitals"])
 
 
 def _specialty_list(hospital: Hospital) -> list[str]:
-    return [s.strip() for s in (hospital.specialties or "").split(",") if s.strip()]
+    return sorted({s.strip() for s in (hospital.specialties or "").split(",") if s.strip()})
 
 
 def _facility_type_label(value: str) -> str:

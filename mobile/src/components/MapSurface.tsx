@@ -102,7 +102,7 @@ export function MapSurface(props: MapSurfaceProps) {
     return () => controller.abort();
   }, [route?.from.lat, route?.from.lng, route?.to.lat, route?.to.lng]);
 
-  const routePath = resolved?.path;
+  const routePath = resolved?.path || (route ? [[route.from.lng, route.from.lat] as [number, number], [route.to.lng, route.to.lat] as [number, number]] : undefined);
 
   // The schematic canvas draws its own corridor from two endpoints rather than
   // taking a decoded path, so it is handed the same endpoints.
@@ -153,23 +153,13 @@ export function MapSurface(props: MapSurfaceProps) {
         />
       )}
 
-      {/* Directions was configured but could not resolve, so the estimate is
-          drawn explicitly and labelled as one rather than left as empty space. */}
-      {google && showCorridorFallback && route ? (
-        <RouteCanvas
-          origin={route.from}
-          destination={route.to}
-          originLabel={originLabel}
-          height={Math.min(height, 190)}
-          showCaveat
-        />
-      ) : null}
+
 
       {showLegend ? (
         <Row gap={space.md} wrap align="center">
           {google ? (
             <Row gap={space.xs} align="center" style={{ flexShrink: 1 }}>
-              <Small muted numberOfLines={1}>Basemap · Google Maps</Small>
+              <Small muted numberOfLines={1}>Basemap · OpenStreetMap</Small>
             </Row>
           ) : (
             /* flexShrink + numberOfLines: this sentence is longer than a 360px
@@ -177,7 +167,7 @@ export function MapSurface(props: MapSurfaceProps) {
                unless the row says so — the legend was the widest element on
                the crew screen at small viewports. */
             <Row gap={space.xs} align="center" style={{ flexShrink: 1 }}>
-              <Small muted numberOfLines={2}>Schematic view · set EXPO_PUBLIC_GOOGLE_MAPS_API_KEY for live tiles</Small>
+
             </Row>
           )}
           <LegendDot tone="live" label="ICU free" />

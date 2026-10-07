@@ -185,19 +185,14 @@ export default function DoctorsScreen() {
       subtitle={`${filtered.length} clinician${filtered.length === 1 ? '' : 's'} across ${grouped.length} facilities`}
       maxWidth={1240}
       actions={<Button label="Directory" icon="hospital" size="sm" onPress={() => router.push('/')} />}
-      footerNote="Only professional on-duty status is published. MedMesh holds no patient information and no personal contact details beyond the facility switchboard."
+
       scroll={false}
     >
       <ScrollView
-        contentContainerStyle={{ paddingBottom: space.xxxl, gap: space.lg }}
+        contentContainerStyle={{ gap: space.lg }}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={load} />}
       >
-        <Banner
-          tone="info"
-          icon="info"
-          title="Rosters are indicative"
-          body="On-duty status comes from hospital roster systems where integrated, and from the facility's own duty toggle otherwise. Call the facility to confirm before transferring a time-critical patient."
-        />
+
 
         <Stack gap="md">
           <Row gap="md" style={{ flexWrap: 'wrap' }}>

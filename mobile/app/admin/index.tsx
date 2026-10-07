@@ -597,9 +597,9 @@ function UsersPanel({
   return (
     <Stack gap={space.lg}>
       <Card>
-        /* align flex-start, not center: on a wrapping row the default
+        {/* align flex-start, not center: on a wrapping row the default
            alignment lets the button column keep its intrinsic width on a
-           narrow phone instead of moving under the title. */
+           narrow phone instead of moving under the title. */}
         <Row justify="space-between" align="flex-start" wrap gap={space.md}>
           <Stack gap={2} style={{ flexShrink: 1 }}>
             <SectionHeader label="Who can do what" />

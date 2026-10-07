@@ -493,12 +493,7 @@ export default function CrewScreen() {
           />
         </Row>
       }
-      footerNote={
-        (hasDirections()
-          ? 'Route geometry is resolved by Google Directions. Traffic-aware ETA to the receiving desk. Navigation opens in your own maps app.'
-          : 'Route shown is an estimated corridor for situational awareness, not turn-by-turn navigation. Set EXPO_PUBLIC_GOOGLE_MAPS_API_KEY to resolve live road routes.') +
-        ' Live GPS while trip screen is active — keep the app in the foreground on a trip.'
-      }
+
       scroll={false}
     >
       <ScrollView
@@ -795,36 +790,7 @@ export default function CrewScreen() {
                     <Meter value={cap.vent_effective} total={cap.total_ventilators} tone="warm" height={3} />
                   </Stack>
                 </Row>
-                <Divider />
-                <Row gap="lg" wrap>
-                  <Stack gap="xxs">
-                    <Label style={{ fontSize: 9.5 }}>Waiting in ED</Label>
-                    <Num size={14}>{cap.ed_waiting}</Num>
-                  </Stack>
-                  <Stack gap="xxs">
-                    <Label style={{ fontSize: 9.5 }}>Blood units</Label>
-                    <Num size={14}>{cap.blood_units}</Num>
-                  </Stack>
-                  <Stack gap="xxs">
-                    <Label style={{ fontSize: 9.5 }}>Antivenom</Label>
-                    <Num size={14}>{cap.antivenom_vials}</Num>
-                  </Stack>
-                  {cap.holds_active > 0 ? (
-                    <Stack gap="xxs">
-                      <Label style={{ fontSize: 9.5 }}>Held</Label>
-                      <Num size={14} color={t.status.info.base}>
-                        {cap.holds_active}
-                      </Num>
-                    </Stack>
-                  ) : null}
-                </Row>
-                <Row gap="xs" wrap>
-                  {Object.entries(destination.capabilities)
-                    .filter(([, v]) => v)
-                    .map(([k]) => (
-                      <Pill key={k} label={k.replace(/_/g, ' ')} tone="neutral" compact outline />
-                    ))}
-                </Row>
+
               </>
             ) : (
               <Small muted>No live capacity for this facility. Call the desk before arrival.</Small>

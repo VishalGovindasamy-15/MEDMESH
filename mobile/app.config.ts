@@ -117,6 +117,9 @@ const config: ExpoConfig = {
     /** Read back by src/lib/maps.ts to decide whether to mount the native SDK view. */
     nativeMaps: Boolean(androidKey || iosKey),
     apiUrl,
+    eas: {
+    projectId: 'ab3f4da2-5a43-4da1-973b-c5409d438f7d',
+    },
   },
 };
 

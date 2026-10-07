@@ -1,5 +1,5 @@
 import React from 'react';
-import { ActivityIndicator, ScrollView, StyleSheet, View } from 'react-native';
+import { ActivityIndicator, ScrollView, StyleSheet, View, Image } from 'react-native';
 
 import { useTheme } from '../theme/ThemeProvider';
 import { radius, space } from '../theme/tokens';
@@ -174,25 +174,9 @@ function Splash() {
         gap: space.md,
       }}
     >
-      <View
-        style={{
-          width: 44,
-          height: 44,
-          borderRadius: radius.lg,
-          backgroundColor: t.accent.base,
-          alignItems: 'center',
-          justifyContent: 'center',
-        }}
-      >
-        <Icon name="pulse" size={24} color={t.accent.on} strokeWidth={2.2} />
-      </View>
-      <View style={{ alignItems: 'center', gap: 3 }}>
-        <Label style={{ letterSpacing: 1.4 }}>MEDMESH</Label>
-        <Small muted style={{ fontSize: 11.5 }}>
-          Restoring session…
-        </Small>
-      </View>
-      <ActivityIndicator color={t.fg.faint} />
+      <Image source={require('../../assets/logo.png')} style={{ width: 100, height: 100 }} resizeMode="contain" />
+
+
     </View>
   );
 }

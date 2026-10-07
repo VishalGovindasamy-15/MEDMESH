@@ -1093,7 +1093,13 @@ export function KeyValue({
       }}
     >
       <Text style={{ fontSize: 12.5, color: t.fg.muted }}>{label}</Text>
-      <View style={{ alignItems: 'flex-end', flexShrink: 1 }}>{children}</View>
+      <View style={{ alignItems: 'flex-end', flexShrink: 1 }}>
+        {typeof children === 'string' || typeof children === 'number' ? (
+          <Body style={{ fontSize: 12.5, textAlign: 'right' }}>{children}</Body>
+        ) : (
+          children
+        )}
+      </View>
     </View>
   );
 }

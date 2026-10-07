@@ -9,7 +9,6 @@ import { DistrictField } from '../src/components/Selectors';
 import type { PickerDistrict } from '../src/components/DistrictPicker';
 import { MapSurface } from '../src/components/MapSurface';
 import { toMapPoints } from '../src/components/mapTypes';
-import { VoiceSearchField } from '../src/components/VoiceSearch';
 import { CAPABILITY_LABELS } from '../src/lib/format';
 import { useAuth } from '../src/state/AuthProvider';
 import { ageLabel, useLive } from '../src/state/LiveProvider';
@@ -288,7 +287,7 @@ export default function DirectoryScreen() {
     for (const f of merged) {
       perDistrict.set(f.district_id, (perDistrict.get(f.district_id) ?? 0) + 1);
     }
-    return districts.map((d) => ({
+    return (districts || []).map((d) => ({
       id: d.id,
       name: d.name,
       name_ta: d.name_ta,
@@ -311,6 +310,7 @@ export default function DirectoryScreen() {
           : `Tamil Nadu · all ${districts.length} districts · ${filtered.length} facilities reporting`
       }
       maxWidth={1320}
+      scroll={false}
       actions={
         // The public front door to onboarding. It is here rather than buried in
         // an admin area on purpose: the hospitals that are hardest to reach are
@@ -341,11 +341,11 @@ export default function DirectoryScreen() {
           />
         </Row>
       }
-      footerNote={tr('home.disclaimer')}
+
       scroll={false}
     >
       <ScrollView
-        contentContainerStyle={{ paddingBottom: space.xxxl, gap: space.lg }}
+        contentContainerStyle={{ gap: space.lg }}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => load()} />}
       >
         {!connected ? (
@@ -377,7 +377,7 @@ export default function DirectoryScreen() {
             flexDirection: 'row',
             flexWrap: 'wrap',
             gap: space.xl,
-            padding: space.lg,
+            padding: 0,
             borderRadius: 9,
             borderWidth: StyleSheet.hairlineWidth,
             borderColor: t.line.base,
@@ -442,33 +442,28 @@ export default function DirectoryScreen() {
         <Stack gap="md">
           <Row gap="md" align="center" style={{ flexWrap: 'wrap' }}>
             <View style={{ flex: 1, minWidth: 240 }}>
-              <VoiceSearchField
+              <TextField
                 value={query}
                 onChangeText={setQuery}
                 placeholder={tr('home.search')}
                 hint={tr('home.searchHint')}
-                voiceLabel={tr('home.voice')}
-                listeningLabel={tr('home.voiceListening')}
-                unsupportedLabel={tr('home.voiceUnsupported')}
-                lang={lang}
+                icon="search"
               />
             </View>
-            {!isPhone ? (
-              <Row gap="xs">
-                <Button
-                  label={showMap ? tr('home.hideMap') : tr('home.showMap')}
-                  icon={showMap ? 'layers' : 'pin'}
-                  size="md"
-                  onPress={() => setShowMap((v) => !v)}
-                />
-                <Button
-                  label="Doctors"
-                  icon="users"
-                  size="md"
-                  onPress={() => router.push('/doctors')}
-                />
-              </Row>
-            ) : null}
+            <Row gap="xs">
+              <Button
+                label={showMap ? tr('home.hideMap') : tr('home.showMap')}
+                icon={showMap ? 'layers' : 'pin'}
+                size="md"
+                onPress={() => setShowMap((v) => !v)}
+              />
+              <Button
+                label="Doctors"
+                icon="users"
+                size="md"
+                onPress={() => router.push('/doctors')}
+              />
+            </Row>
           </Row>
 
           <Segmented

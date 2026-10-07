@@ -873,17 +873,7 @@ export default function HospitalDashboard() {
                 </Row>
               </Row>
 
-              {specialtyGaps.length ? (
-                <Banner
-                  tone="warm"
-                  icon="alert"
-                  title={`${specialtyGaps.length} specialty${specialtyGaps.length === 1 ? '' : 'ies'} covered by nobody`}
-                  body={`${specialtyGaps
-                    .slice(0, 4)
-                    .map((s) => s.label)
-                    .join(', ')}${specialtyGaps.length > 4 ? ` and ${specialtyGaps.length - 4} more` : ''}. A dispatcher searching for these will not find this facility, whatever its bed count says.`}
-                />
-              ) : null}
+
 
               {draftDoctor ? (
                 <View

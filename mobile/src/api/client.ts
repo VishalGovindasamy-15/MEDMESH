@@ -51,8 +51,31 @@ function resolveHost(): string {
   return `http://localhost:${DEFAULT_PORT}`;
 }
 
-export const BASE_URL = resolveHost();
-export const API_BASE = `${BASE_URL}${API_PREFIX}`;
+import AsyncStorage from '@react-native-async-storage/async-storage';
+
+export let BASE_URL = resolveHost();
+export let API_BASE = `${BASE_URL}${API_PREFIX}`;
+
+export async function initBaseUrl() {
+  try {
+    const stored = await AsyncStorage.getItem('medmesh.baseUrl');
+    if (stored) {
+      BASE_URL = stored;
+      API_BASE = `${BASE_URL}${API_PREFIX}`;
+    }
+  } catch (e) {}
+}
+
+export function setBaseUrl(url: string | null) {
+  if (url) {
+    BASE_URL = url.replace(/\/$/, '');
+    AsyncStorage.setItem('medmesh.baseUrl', BASE_URL);
+  } else {
+    BASE_URL = resolveHost();
+    AsyncStorage.removeItem('medmesh.baseUrl');
+  }
+  API_BASE = `${BASE_URL}${API_PREFIX}`;
+}
 
 export function wsUrl(path: string, token?: string | null): string {
   const base = BASE_URL.replace(/^http/, 'ws');

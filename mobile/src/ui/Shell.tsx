@@ -1,6 +1,6 @@
 import { usePathname, useRouter } from 'expo-router';
 import React, { useEffect, useState } from 'react';
-import { Platform, Pressable, ScrollView, StyleSheet, View } from 'react-native';
+import { Platform, Pressable, ScrollView, StyleSheet, View, Image } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import type { Role, SessionUser } from '../api/types';
@@ -73,6 +73,11 @@ export function AppShell({
   const [barHeight, setBarHeight] = useState(0);
 
   const items = NAV.filter((item) => !item.roles || (user && item.roles.includes(user.role)));
+  if (user) {
+    items.push({ href: '/account', label: 'Profile', icon: 'user' });
+  } else {
+    items.push({ href: '/sign-in', label: 'Login', icon: 'user' });
+  }
 
   const isActive = (item: NavItem) => {
     if (item.href === '/') return pathname === '/' || pathname.startsWith('/facility');
@@ -84,17 +89,16 @@ export function AppShell({
   const connectionLabel = !connected ? 'Offline' : degraded ? 'Stalled' : 'Live';
 
   const body = (
-    <View style={{ flex: 1, minHeight: 0, alignItems: 'center' }}>
+    <View style={{ flex: 1, minHeight: 0, alignItems: 'stretch' }}>
       <View
         style={{
           flex: 1,
           minHeight: 0,
           width: '100%',
-          maxWidth,
           paddingHorizontal: gutter,
           paddingTop: space.lg,
           gap: space.lg,
-          paddingBottom: isDesktop ? space.xxxl : barHeight + space.lg + insets.bottom,
+          paddingBottom: 0,
         }}
       >
         <DemoStrip />
@@ -203,43 +207,8 @@ export function PageHeader({
   return (
     <View style={{ gap: space.md }}>
       <Row align="flex-start" justify="space-between" gap="md" style={{ flexWrap: 'wrap' }}>
-        <View style={{ flexShrink: 1, minWidth: 180 }}>
-          {/* #53: two facts, two dots, two labels. "Live" on its own described
-              only the socket — the transport that carries capacity events — and
-              said nothing about how old the newest event was. A reader who saw
-              a green LIVE next to a nine-hour-old figure had been told the
-              opposite of the truth. */}
-          <Row gap="md" align="center" wrap>
-            <Row gap="xs" align="center">
-              <View
-                style={{
-                  width: 6,
-                  height: 6,
-                  borderRadius: 3,
-                  backgroundColor: t.status[connectionTone].base,
-                }}
-              />
-              <Label tone={t.status[connectionTone].base}>Connection {connectionLabel}</Label>
-            </Row>
-            <Row gap="xs" align="center">
-              <View
-                style={{
-                  width: 6,
-                  height: 6,
-                  borderRadius: 3,
-                  backgroundColor:
-                    age === null ? t.fg.faint : age > 900 ? t.status.stale.base : age > 240 ? t.status.warm.base : t.status.live.base,
-                }}
-              />
-              <Label
-                tone={
-                  age === null ? t.fg.muted : age > 900 ? t.status.stale.base : age > 240 ? t.status.warm.base : t.status.live.base
-                }
-              >
-                Facility data {age === null ? 'awaiting first event' : age < 5 ? 'current' : `${ageFromSeconds(age)} old`}
-              </Label>
-            </Row>
-          </Row>
+        <Row align="flex-start" gap="md" style={{ flexShrink: 1, minWidth: 180 }}>
+          {isPhone && <BrandGlyph />}
           <View style={{ marginTop: 3 }}>
             <Title style={{ fontSize: compact ? 18 : 22, letterSpacing: -0.4 }}>{title}</Title>
             {subtitle ? (
@@ -248,7 +217,7 @@ export function PageHeader({
               </Small>
             ) : null}
           </View>
-        </View>
+        </Row>
 
         {/* wrap + shrink: header actions are buttons with real labels ("Report
             an inaccuracy", "Refresh now"); on a 360px phone the title column
@@ -405,60 +374,7 @@ function SideRail({
           })}
         </Stack>
 
-        <View
-          style={{
-            padding: space.md,
-            borderRadius: radius.md,
-            backgroundColor: t.bg.sunken,
-            borderWidth: StyleSheet.hairlineWidth,
-            borderColor: t.line.subtle,
-            gap: 6,
-          }}
-        >
-          <Row gap="xs" align="center">
-            <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: t.status[connection.tone].base }} />
-            <Label tone={t.status[connection.tone].base}>Connection {connection.label}</Label>
-          </Row>
-          {/* #53: "feed live" used to describe only the socket. A green dot next
-              to a directory whose newest figure is from this morning is a lie
-              told in good faith: the transport is fine and the data is not. The
-              two facts get two lines, so a reader can tell them apart without
-              opening a facility. */}
-          <Row gap="xs" align="center" style={{ marginTop: 2 }}>
-            <View
-              style={{
-                width: 6,
-                height: 6,
-                borderRadius: 3,
-                backgroundColor:
-                  dataAge === null
-                    ? t.fg.faint
-                    : dataAge > 900
-                      ? t.status.stale.base
-                      : dataAge > 240
-                        ? t.status.warm.base
-                        : t.status.live.base,
-              }}
-            />
-            <Label
-              tone={
-                dataAge === null
-                  ? t.fg.muted
-                  : dataAge > 900
-                    ? t.status.stale.base
-                    : dataAge > 240
-                      ? t.status.warm.base
-                      : t.status.live.base
-              }
-            >
-              Facility data {dataAge === null ? 'awaiting first event' : dataAge < 5 ? 'current' : `${ageFromSeconds(dataAge)} old`}
-            </Label>
-          </Row>
-          <Small muted style={{ fontSize: 11.5 }}>
-            Connection is the socket; facility data is the age of the newest capacity figure it carried. They can
-            disagree, and when they do the second line is the one to believe.
-          </Small>
-        </View>
+
       </Stack>
 
       <Stack gap="xs">
@@ -798,15 +714,13 @@ function BrandGlyph() {
   return (
     <View
       style={{
-        width: 30,
-        height: 30,
-        borderRadius: radius.md,
-        backgroundColor: t.accent.base,
+        width: 40,
+        height: 40,
         alignItems: 'center',
         justifyContent: 'center',
       }}
     >
-      <Icon name="pulse" size={17} color={t.accent.on} strokeWidth={2.2} />
+      <Image source={require('../../assets/logo.png')} style={{ width: 40, height: 40 }} resizeMode="contain" />
     </View>
   );
 }

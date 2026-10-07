@@ -149,7 +149,7 @@ TN_FACILITIES: list[tuple] = [
 
     # ----------------------------------------------------------------- Chennai
     ("MCMH", "Madras Metropolitan Medical College Hospital", "public", "CHN", 1620, 168, 104, "api",
-     _FULL + ["paediatrics", "critical_care"], 
+     _FULL + ["critical_care"], 
      {"blood_bank", "trauma_centre", "cath_lab", "neonatal_icu", "burn_unit", "dialysis"}, 0.006, 0.005),
     ("SPGH", "Stanley Port Government Hospital", "public", "CHN", 1180, 122, 76, "api",
      _FULL, {"blood_bank", "trauma_centre", "cath_lab", "burn_unit"}, -0.043, 0.031),
@@ -322,7 +322,7 @@ TN_FACILITIES: list[tuple] = [
 
     # ------------------------------------------------------------ Tiruchirappalli
     ("TRMG", "Tiruchirappalli Government Medical College Hospital", "public", "TRY", 1140, 106, 62, "api",
-     _FULL + ["paediatrics", "critical_care"],
+     _FULL + ["critical_care"],
      {"blood_bank", "trauma_centre", "cath_lab", "neonatal_icu", "burn_unit", "dialysis"}, 0.005, 0.005),
     ("SRNG", "Srirangam Temple Town Hospital", "trust", "TRY", 220, 22, 12, "api",
      _MED + ["cardiology"], {"blood_bank", "cath_lab"}, 0.036, 0.024),
@@ -351,7 +351,7 @@ TN_FACILITIES: list[tuple] = [
 
     # ---------------------------------------------------------------- Tirunelveli
     ("TNMG", "Tirunelveli Government Medical College Hospital", "public", "TNV", 1080, 96, 56, "api",
-     _FULL + ["paediatrics"],
+     _FULL,
      {"blood_bank", "trauma_centre", "cath_lab", "neonatal_icu", "burn_unit", "dialysis"}, 0.005, 0.005),
     ("PLYM", "Palayamkottai Mission Hospital", "trust", "TNV", 320, 36, 22, "api",
      _TER, {"blood_bank", "cath_lab", "dialysis"}, 0.011, 0.008),
@@ -421,5 +421,5 @@ TN_FACILITIES: list[tuple] = [
     ("KULK", "Kulasekaram Taluk Hospital", "public", "KKM", 92, 8, 4, "manual",
      _GEN, set(), 0.061, 0.108),
     ("PADM", "Padmanabhapuram Heritage Hospital", "trust", "KKM", 110, 10, 5, "manual",
-     _GEN + ["paediatrics"], set(), 0.028, 0.042),
+     _GEN, set(), 0.028, 0.042),
 ]

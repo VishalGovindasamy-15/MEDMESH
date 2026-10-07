@@ -155,6 +155,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     (async () => {
       try {
+        await require('../api/client').initBaseUrl();
         const [storedToken, storedUser, storedRefresh] = await Promise.all([
           AsyncStorage.getItem(ACCESS_KEY),
           AsyncStorage.getItem(USER_KEY),
@@ -184,6 +185,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         // Corrupt storage — start clean rather than crashing on boot.
         await AsyncStorage.multiRemove([ACCESS_KEY, USER_KEY, REFRESH_KEY]);
       } finally {
+        await new Promise(r => setTimeout(r, 2000));
         setHydrating(false);
       }
     })();
