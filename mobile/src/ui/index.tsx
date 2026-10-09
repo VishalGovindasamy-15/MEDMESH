@@ -570,6 +570,7 @@ export function TextField({
   hint,
   maxLength,
   editable = true,
+  selectTextOnFocus,
 }: {
   value: string;
   onChangeText: (v: string) => void;
@@ -584,6 +585,7 @@ export function TextField({
   hint?: string;
   maxLength?: number;
   editable?: boolean;
+  selectTextOnFocus?: boolean;
 }) {
   const { t } = useTheme();
   const [focused, setFocused] = React.useState(false);
@@ -617,6 +619,7 @@ export function TextField({
           autoCapitalize={autoCapitalize ?? 'sentences'}
           autoCorrect={false}
           keyboardType={keyboardType}
+          selectTextOnFocus={selectTextOnFocus}
           multiline={multiline}
           editable={editable}
           maxLength={maxLength}

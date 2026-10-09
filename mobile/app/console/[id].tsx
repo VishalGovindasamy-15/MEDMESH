@@ -81,6 +81,7 @@ export default function IncidentWorkspace() {
   // usually overriding for a reason the engine cannot see (a crew already at
   // the scene, a unit the caller's family asked for).
   const [crew, setCrew] = useState<{ available: number; results: Ambulance[] } | null>(null);
+  const [proposedAmbulance, setProposedAmbulance] = useState<Ambulance | null>(null);
   const [crewChoice, setCrewChoice] = useState<number | null>(null);
   const [crewPick, setCrewPick] = useState(false);
   // The dispatch confirmation and the override justification are separate
@@ -102,7 +103,7 @@ export default function IncidentWorkspace() {
       try {
         const [inc, list, fleet] = await Promise.all([
           api.get<Incident>(`/incidents/${incidentId}`, { token }),
-          api.get<{ results: ShortlistCandidate[]; routing?: RoutingSummary }>(
+          api.get<{ results: ShortlistCandidate[]; routing?: RoutingSummary; proposed_ambulance?: Ambulance }>(
             `/incidents/${incidentId}/shortlist?limit=12`,
             { token },
           ),
@@ -114,6 +115,7 @@ export default function IncidentWorkspace() {
         ]);
         setIncident(inc);
         setShortlist(list.results);
+        setProposedAmbulance(list.proposed_ambulance ?? null);
         setRouting(list.routing ?? null);
         setCrew({ available: fleet.available, results: fleet.results });
         setSelected((prev) => prev ?? list.results.find((c) => c.eligible)?.hospital_id ?? null);
@@ -899,7 +901,7 @@ export default function IncidentWorkspace() {
                           }}
                         >
                           <Row justify="space-between" align="center" gap="sm">
-                            <Body style={{ fontSize: 12.5 }}>Let the engine choose</Body>
+                            <Body style={{ fontSize: 12.5 }}>{proposedAmbulance ? `Engine choice: ${proposedAmbulance.call_sign} (${proposedAmbulance.capability_label})` : "Let the engine choose"}</Body>
                             {crewChoice === null ? <Icon name="check" size={13} color={t.accent.base} /> : null}
                           </Row>
                         </Pressable>

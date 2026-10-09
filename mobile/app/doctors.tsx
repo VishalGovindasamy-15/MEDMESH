@@ -181,7 +181,7 @@ export default function DoctorsScreen() {
 
   return (
     <AppShell
-      title="Specialist cover, right now"
+      title="Specialist cover right now"
       subtitle={`${filtered.length} clinician${filtered.length === 1 ? '' : 's'} across ${grouped.length} facilities`}
       maxWidth={1240}
       actions={<Button label="Directory" icon="hospital" size="sm" onPress={() => router.push('/')} />}

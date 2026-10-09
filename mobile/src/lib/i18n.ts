@@ -29,7 +29,7 @@ type Dict = Record<string, string>;
 
 const EN: Dict = {
   'app.tagline': 'CAPACITY EXCHANGE',
-  'home.title': 'Where is care available right now',
+  'home.title': 'care available right now',
   'home.search': 'Hospital, area or landmark',
   'home.searchHint': 'Name, district, specialty or capability — e.g. snakebite Pollachi',
   'home.voice': 'Speak your search',

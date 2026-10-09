@@ -167,7 +167,7 @@ export function MapSurface(props: MapSurfaceProps) {
                unless the row says so — the legend was the widest element on
                the crew screen at small viewports. */
             <Row gap={space.xs} align="center" style={{ flexShrink: 1 }}>
-
+              
             </Row>
           )}
           <LegendDot tone="live" label="ICU free" />
@@ -182,7 +182,9 @@ export function MapSurface(props: MapSurfaceProps) {
             </Small>
           ) : null}
           {route && !resolved && !routing && hasDirections() ? (
-            <Small muted style={{ flexShrink: 1 }} numberOfLines={2}>Directions unavailable — corridor shown is an estimate</Small>
+            <Small muted style={{ flexShrink: 1 }} numberOfLines={2}>
+              Directions unavailable — corridor shown is an estimate
+            </Small>
           ) : null}
         </Row>
       ) : null}

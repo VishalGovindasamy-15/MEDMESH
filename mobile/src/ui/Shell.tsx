@@ -210,7 +210,7 @@ export function PageHeader({
       <Row align="flex-start" justify="space-between" gap="md" style={{ flexWrap: 'wrap' }}>
         <Row align="flex-start" gap="md" style={{ flexShrink: 1, minWidth: 180 }}>
           {isPhone && <BrandGlyph />}
-          <View style={{ marginTop: 3 }}>
+          <View style={{ marginTop: 3, flexShrink: 1 }}>
             <Title style={{ fontSize: compact ? 18 : 22, letterSpacing: -0.4 }}>{title}</Title>
             {subtitle ? (
               <Small muted style={{ marginTop: 1 }}>

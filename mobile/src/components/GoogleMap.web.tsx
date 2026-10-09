@@ -1,6 +1,7 @@
 import React, { useEffect } from 'react';
 import { MapContainer, TileLayer, Marker, Popup, Polyline, useMap } from 'react-leaflet';
 import L from 'leaflet';
+import { MapPoint, pinFill, freshnessOf, RING_COLOUR } from './mapTypes';
 import { useTheme } from '../theme/ThemeProvider';
 import { View } from 'react-native';
 
@@ -50,7 +51,7 @@ export function GoogleMap({
   const { t } = useTheme();
 
   // Create custom icon
-  const createIcon = (color: string, isSelected: boolean) => {
+  const createIcon = (color: string, isSelected: boolean, strokeColor: string = 'white') => {
     return L.divIcon({
       className: 'custom-marker',
       html: `<div style="
@@ -58,7 +59,7 @@ export function GoogleMap({
         width: ${isSelected ? '24px' : '16px'};
         height: ${isSelected ? '24px' : '16px'};
         border-radius: 50%;
-        border: 2px solid white;
+        border: 2px solid ${strokeColor};
         box-shadow: 0 0 4px rgba(0,0,0,0.5);
       "></div>`,
       iconSize: isSelected ? [24, 24] : [16, 16],
@@ -78,22 +79,22 @@ export function GoogleMap({
         zoom={zoom} 
         style={{ height: '100%', width: '100%' }}
         scrollWheelZoom={false}
+        attributionControl={false}
       >
         <MapUpdater points={points} center={defaultCenter} zoom={zoom} origin={origin} />
         <TileLayer
           url="https://tile.openstreetmap.org/{z}/{x}/{y}.png"
-          attribution="&copy; OpenStreetMap contributors"
         />
         {points.map((p) => {
           const isSelected = selectedId === p.id;
-          const color = p.tone === 'live' ? t.status.live.base : 
-                        p.tone === 'warm' ? t.status.warm.base : 
-                        p.tone === 'critical' ? t.status.critical.base : t.fg.muted;
+          const fill = pinFill(p);
+          const freshness = freshnessOf(p);
+          const stroke = RING_COLOUR[freshness];
           return (
             <Marker 
               key={p.id}
               position={[p.lat, p.lng]} 
-              icon={createIcon(color, isSelected)}
+              icon={createIcon(fill, isSelected, stroke)}
               eventHandlers={{
                 click: () => onSelect && onSelect(p.id)
               }}

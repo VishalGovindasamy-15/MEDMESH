@@ -14,6 +14,7 @@ event, not an exception.
 """
 
 from __future__ import annotations
+from pydantic import BaseModel
 
 import json
 from datetime import timedelta
@@ -622,7 +623,17 @@ def get_shortlist(
     if not refresh and incident.match_snapshot:
         return {"snapshot": json.loads(incident.match_snapshot), "live": False}
     shortlist = build_shortlist(db, incident=incident, limit=limit)
-    return {"results": list(shortlist), "routing": shortlist.routing, "live": True}
+    
+    proposed_ambulance, crew_match = _select_ambulance(db, incident)
+    ambulance_payload = _ambulance_out(proposed_ambulance) if proposed_ambulance else None
+
+    return {
+        "results": list(shortlist), 
+        "routing": shortlist.routing, 
+        "live": True,
+        "proposed_ambulance": ambulance_payload,
+        "crew_match": crew_match
+    }
 
 
 @router.post("/incidents/{incident_id}/dispatch")
@@ -2422,3 +2433,130 @@ def _correct_capacity(db: Session, *, hospital: Hospital, resource: str, actor: 
         note=f"corrected after {hospital.short_name} declined {incident.reference}: no {resource}",
     )
     return 0
+@router.get("/incidents/{incident_id}/mci-plan")
+def get_mci_plan(incident_id: int, user: CurrentUser, db: Session = Depends(get_db)):
+    incident = db.get(Incident, incident_id)
+    if incident is None:
+        raise HTTPException(status_code=404, detail="Incident not found")
+    if incident.casualty_count <= 1:
+        raise HTTPException(status_code=400, detail="Not a mass casualty incident")
+
+    # 1. Get Top Hospitals
+    shortlist = build_shortlist(db, incident=incident, limit=10, include_ineligible=False)
+    hospitals = list(shortlist)
+    if not hospitals:
+        raise HTTPException(status_code=409, detail="No eligible hospitals found for the required capabilities")
+
+    # 2. Get Available Ambulances
+    from sqlalchemy.orm import joinedload
+    available_ambulances = list(
+        db.execute(
+            select(Ambulance)
+            .where(Ambulance.status == AmbulanceStatus.AVAILABLE)
+        ).scalars()
+    )
+    # Sort them by distance to incident (simplified distance, or we can use rank)
+    def dist(a):
+        return (a.lat - incident.lat)**2 + (a.lng - incident.lng)**2 if a.lat and a.lng else 9999
+    
+    available_ambulances.sort(key=dist)
+
+    N = min(incident.casualty_count, len(available_ambulances))
+    
+    plan = []
+    # Simple Round-Robin Distribution
+    for i in range(N):
+        amb = available_ambulances[i]
+        hosp = hospitals[i % len(hospitals)]
+        plan.append({
+            "ambulance_id": amb.id,
+            "hospital_id": hosp["hospital_id"],
+            "ambulance_call_sign": amb.call_sign,
+            "hospital_name": hosp["short_name"],
+            "patient_index": i + 1
+        })
+
+    return {
+        "plan": plan,
+        "available_ambulances": [_ambulance_out(a) for a in available_ambulances],
+        "shortlist": hospitals
+    }
+
+class MCICommitItem(BaseModel):
+    ambulance_id: int
+    hospital_id: int
+
+class MCICommitPayload(BaseModel):
+    assignments: list[MCICommitItem]
+
+@router.post("/incidents/{incident_id}/mci-commit")
+def commit_mci(
+    incident_id: int, 
+    payload: MCICommitPayload, 
+    user: CurrentUser, 
+    db: Session = Depends(get_db)
+):
+    parent = db.get(Incident, incident_id)
+    if parent is None:
+        raise HTTPException(status_code=404, detail="Incident not found")
+    if parent.status != IncidentStatus.OPEN:
+        raise HTTPException(status_code=409, detail="Incident is not open")
+
+    dispatched_incidents = []
+    original_reference = parent.reference
+
+    for i, assignment in enumerate(payload.assignments):
+        amb = db.get(Ambulance, assignment.ambulance_id)
+        hosp = db.get(Hospital, assignment.hospital_id)
+        
+        if amb is None or hosp is None:
+            continue
+
+        if amb.status != AmbulanceStatus.AVAILABLE:
+            continue
+
+        # Use the parent incident for the first one, create clones for the rest
+        if i == 0:
+            inc = parent
+            inc.casualty_count = 1
+            inc.reference = f"{original_reference}-1"
+        else:
+            inc = Incident(
+                reference=f"{original_reference}-{i+1}",
+                category=parent.category,
+                urgency=parent.urgency,
+                lat=parent.lat,
+                lng=parent.lng,
+                landmark=parent.landmark,
+                district_id=parent.district_id,
+                taluk=parent.taluk,
+                location_source=parent.location_source,
+                patient_state=parent.patient_state,
+                casualty_count=1,
+                mechanism=parent.mechanism,
+                bleeding=parent.bleeding,
+                hazard=parent.hazard,
+                trapped=parent.trapped,
+                bystander_cpr=parent.bystander_cpr,
+                observations=parent.observations,
+                required_specialty=parent.required_specialty,
+                requires_icu=parent.requires_icu,
+                requires_ventilator=parent.requires_ventilator,
+                requires_blood=parent.requires_blood,
+                created_by=parent.created_by,
+                status=IncidentStatus.OPEN
+            )
+            db.add(inc)
+            db.flush() # get ID
+
+        inc.assigned_hospital_id = hosp.id
+        inc.assigned_ambulance_id = amb.id
+        inc.status = IncidentStatus.DISPATCHED
+        inc.dispatched_at = utcnow()
+        amb.status = AmbulanceStatus.ASSIGNED
+
+        dispatched_incidents.append(inc.id)
+
+    db.commit()
+    return {"dispatched_incident_ids": dispatched_incidents}
+

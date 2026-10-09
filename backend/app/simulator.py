@@ -216,7 +216,10 @@ async def _control_room_tick() -> None:
 
             candidate = scout.execute(
                 select(Incident)
-                .where(Incident.status == IncidentStatus.OPEN)
+                .where(
+                    Incident.status == IncidentStatus.OPEN,
+                    Incident.casualty_count == 1
+                )
                 .order_by(Incident.urgency, Incident.created_at)
                 .limit(1)
             ).scalars().first()
@@ -459,7 +462,7 @@ def _workflow_tick() -> None:
             )
         ).scalars().all()
         waiting = [i for i in sorted(open_incidents, key=lambda i: i.created_at)
-                   if (now - i.created_at).total_seconds() >= 20]
+                   if (now - i.created_at).total_seconds() >= 20 and i.casualty_count == 1]
 
         if waiting and len(free_units) >= 2 and _rng.random() < 0.18:
             incident = waiting[0]

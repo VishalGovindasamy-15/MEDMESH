@@ -134,7 +134,7 @@ export default function ConsoleScreen() {
     mechanism: 'none',
     bleeding: 'none',
     hazard: 'none',
-    casualty_count: 1,
+    casualty_count: '1',
     trapped: false,
     bystander_cpr: false,
   });
@@ -280,6 +280,7 @@ export default function ConsoleScreen() {
           landmark: landmark.trim() || 'Landmark pending — operator to confirm',
           district_id: Number(districtId),
           ...scene,
+          casualty_count: parseInt(scene.casualty_count, 10) || 1,
           observations,
           // No requires_* here on purpose: the server derives them from the
           // assessment and reports what it inferred. Sending false would
@@ -297,12 +298,16 @@ export default function ConsoleScreen() {
         mechanism: 'none',
         bleeding: 'none',
         hazard: 'none',
-        casualty_count: 1,
+        casualty_count: '1',
         trapped: false,
         bystander_cpr: false,
       });
       setObservations([]);
-      router.push(`/console/${created.id}`);
+      if ((parseInt(scene.casualty_count, 10) || 1) > 1) {
+        router.push(`/console/mci/${created.id}`);
+      } else {
+        router.push(`/console/${created.id}`);
+      }
     } catch (err) {
       setIntakeError(err instanceof ApiError ? err.message : 'Could not create the incident');
     } finally {
@@ -400,20 +405,36 @@ export default function ConsoleScreen() {
         </View>
       </Stack>
 
-      <Stack gap="sm">
-        <Label>Priority</Label>
-        <Segmented
-          options={[
-            { value: 'P1', label: 'P1 · lights & siren' },
-            { value: 'P2', label: 'P2 · urgent' },
-            { value: 'P3', label: 'P3 · stable' },
-          ]}
-          value={urgency}
-          onChange={setUrgency}
-          size="sm"
-          scroll
-        />
-      </Stack>
+      <Row gap="md">
+        <Stack gap="sm" style={{ flex: 1, minWidth: 100 }}>
+          <Label>Casualties at scene</Label>
+          <TextField
+            value={scene.casualty_count}
+            onChangeText={(v) => {
+              const clean = v.replace(/[^0-9]/g, '');
+              setScene((p) => ({ ...p, casualty_count: clean }));
+            }}
+            keyboardType="numeric"
+            placeholder="1"
+            selectTextOnFocus
+          />
+        </Stack>
+
+        <Stack gap="sm" style={{ flex: 2 }}>
+          <Label>Priority</Label>
+          <Segmented
+            options={[
+              { value: 'P1', label: 'P1 · lights & siren' },
+              { value: 'P2', label: 'P2 · urgent' },
+              { value: 'P3', label: 'P3 · stable' },
+            ]}
+            value={urgency}
+            onChange={setUrgency}
+            size="sm"
+            scroll
+          />
+        </Stack>
+      </Row>
 
       {/* Step 3 of four: where.
           District first, then landmark, then the coordinate capture, because the
@@ -459,8 +480,8 @@ export default function ConsoleScreen() {
 
       <Row gap="sm">
         <Button
-          label="Create incident & find hospital"
-          variant="primary"
+          label={(parseInt(scene.casualty_count, 10) || 1) > 1 ? `Create incident & Plan MCI (${parseInt(scene.casualty_count, 10) || 1} units)` : "Create incident & find hospital"}
+          variant={(parseInt(scene.casualty_count, 10) || 1) > 1 ? "danger" : "primary"}
           icon="siren"
           loading={submitting}
           onPress={createIncident}
@@ -612,20 +633,7 @@ export default function ConsoleScreen() {
       </Stack>
 
       <Row gap="md" wrap>
-        <Stack gap="xs" style={{ flex: 1, minWidth: 140 }}>
-          <Label>Casualties at scene</Label>
-          <Segmented
-            options={[
-              { value: '1', label: '1' },
-              { value: '2', label: '2' },
-              { value: '3', label: '3' },
-              { value: '5', label: '4+' },
-            ]}
-            value={String(scene.casualty_count)}
-            onChange={(v) => setScene((p) => ({ ...p, casualty_count: Number(v) }))}
-            size="sm"
-          />
-        </Stack>
+
         <Stack gap="xs" style={{ flex: 1, minWidth: 160 }}>
           <SwitchRow
             label="Trapped / needs extrication"
