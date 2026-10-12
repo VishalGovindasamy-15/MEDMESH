@@ -862,6 +862,7 @@ def _select_ambulance(
     unit_legs = routing.legs_for_rows(
         (incident.lat, incident.lng),
         [(a.id, a.lat, a.lng) for a in available],
+        max_road_distance_km=settings.routing_prefilter_km,
     )
     by_distance = sorted(available, key=lambda a: unit_legs[a.id].road_km)
 
