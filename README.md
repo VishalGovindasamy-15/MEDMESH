@@ -5,20 +5,40 @@
 
 ---
 
+## Visual Showcase — Desktop & Mobile Views
+
+| Surface | Desktop View (Web / Console) | Mobile View (PWA / Handset) |
+|:---|:---|:---|
+| **Public Capacity Directory & Map**<br>*(Live beds, ICU status, trust indicator, bilingual EN/TA)* | <img src="docs/shots/directory-desktop.png" width="550" alt="Directory Desktop"/> | <img src="docs/shots/directory-phone.png" width="220" alt="Directory Mobile"/> |
+| **Hospital Facility Detail**<br>*(Capacity breakdown, trust score deltas, on-duty specialists)* | <img src="docs/shots/facility-desktop.png" width="550" alt="Facility Detail Desktop"/> | <img src="docs/shots/facility-phone.png" width="220" alt="Facility Detail Mobile"/> |
+| **108 Emergency Dispatch Console**<br>*(Live call intake, incident queue, real-time fleet map)* | <img src="docs/shots/console-desktop.png" width="550" alt="108 Console Desktop"/> | <img src="docs/shots/console-phone.png" width="220" alt="108 Console Mobile"/> |
+| **Incident Workspace & Ranked Shortlist**<br>*(6-factor capability matching, bed holds, ambulance picker)* | <img src="docs/shots/case-desktop.png" width="550" alt="Incident Shortlist Desktop"/> | <img src="docs/shots/case-phone.png" width="220" alt="Incident Shortlist Mobile"/> |
+| **Ambulance Crew Navigation & Trip Lifecycle**<br>*(Turn-by-turn routing, one-tap stage progression, handover)* | <img src="docs/shots/crew-desktop.png" width="550" alt="Crew Dashboard Desktop"/> | <img src="docs/shots/crew-phone.png" width="220" alt="Crew Dashboard Mobile"/> |
+| **Hospital Bed Control Portal**<br>*(Inbound ambulance alerts, quick-adjust capacity keypad)* | <img src="docs/shots/dashboard-desktop.png" width="550" alt="Hospital Portal Desktop"/> | <img src="docs/shots/dashboard-phone.png" width="220" alt="Hospital Portal Mobile"/> |
+| **Specialist Doctor Roster**<br>*(Departmental cover, active on-duty clinicians)* | <img src="docs/shots/doctors-desktop.png" width="550" alt="Doctors Directory Desktop"/> | <img src="docs/shots/doctors-phone.png" width="220" alt="Doctors Directory Mobile"/> |
+| **Government Health Analytics**<br>*(District capacity rollups, surge control, SLA monitoring)* | <img src="docs/shots/analytics-desktop.png" width="550" alt="Analytics Desktop"/> | <img src="docs/shots/analytics-phone.png" width="220" alt="Analytics Mobile"/> |
+| **District Detail & Trend Drilldown**<br>*(Per-facility occupancy trends and historical logs)* | <img src="docs/shots/analytics-district-desktop.png" width="550" alt="District Drilldown Desktop"/> | <img src="docs/shots/analytics-district-phone.png" width="220" alt="District Drilldown Mobile"/> |
+| **Platform Administration & Fleet Operations**<br>*(Vehicle registration, driver assignment, audit trail)* | <img src="docs/shots/admin-desktop.png" width="550" alt="Admin Portal Desktop"/> | <img src="docs/shots/admin-phone.png" width="220" alt="Admin Portal Mobile"/> |
+| **Role-Scoped Notification Inbox**<br>*(Inbound ambulance alerts, hold expirations, handoffs)* | <img src="docs/shots/inbox-dispatcher-desktop.png" width="550" alt="Inbox Desktop"/> | <img src="docs/shots/inbox-dispatcher-phone.png" width="220" alt="Inbox Mobile"/> |
+| **Staff Authentication & Pilot Accounts**<br>*(Role-scoped sign-in and one-tap test credentials)* | <img src="docs/shots/signin-desktop.png" width="550" alt="Sign In Desktop"/> | <img src="docs/shots/signin-phone.png" width="220" alt="Sign In Mobile"/> |
+
+---
+
 ## Table of Contents
 
-1. [Executive Summary & Core Philosophy](#1-executive-summary--core-philosophy)
-2. [High-Level Architecture](#2-high-level-architecture)
-3. [Technology Stack](#3-technology-stack)
-4. [Core Engines & Business Logic](#4-core-engines--business-logic)
-   - [4.1 Data Quality & Trust Engine](#41-data-quality--trust-engine)
-   - [4.2 Capability-First Matching & Routing Engine](#42-capability-first-matching--routing-engine)
-   - [4.3 Bed Reservation & Critical Section Engine](#43-bed-reservation--critical-section-engine)
-   - [4.4 Zero-PHI Structural Triage](#44-zero-phi-structural-triage)
-   - [4.5 Mass Casualty Incident (MCI) Protocol](#45-mass-casualty-incident-mci-protocol)
-   - [4.6 Ambulance State Machine & Escalation Ladder](#46-ambulance-state-machine--escalation-ladder)
-   - [4.7 Doctor Roster & Specialty Cover Service](#47-doctor-roster--specialty-cover-service)
-5. [User Roles & Complete End-to-End User Flows](#5-user-roles--complete-end-to-end-user-flows)
+1. [Visual Showcase — Desktop & Mobile Views](#visual-showcase--desktop--mobile-views)
+2. [Executive Summary & Core Philosophy](#2-executive-summary--core-philosophy)
+3. [High-Level Architecture](#3-high-level-architecture)
+4. [Technology Stack](#4-technology-stack)
+5. [Core Engines & Business Logic](#5-core-engines--business-logic)
+   - [5.1 Data Quality & Trust Engine](#51-data-quality--trust-engine)
+   - [5.2 Capability-First Matching & Routing Engine](#52-capability-first-matching--routing-engine)
+   - [5.3 Bed Reservation & Critical Section Engine](#53-bed-reservation--critical-section-engine)
+   - [5.4 Zero-PHI Structural Triage](#54-zero-phi-structural-triage)
+   - [5.5 Mass Casualty Incident (MCI) Protocol](#55-mass-casualty-incident-mci-protocol)
+   - [5.6 Ambulance State Machine & Escalation Ladder](#56-ambulance-state-machine--escalation-ladder)
+   - [5.7 Doctor Roster & Specialty Cover Service](#57-doctor-roster--specialty-cover-service)
+6. [User Roles & Complete End-to-End User Flows](#6-user-roles--complete-end-to-end-user-flows)
    - [Role Matrix](#role-matrix)
    - [Flow 1: Citizen / Public User Journey](#flow-1-citizen--public-user-journey)
    - [Flow 2: 108 Emergency Dispatcher Workflow (Single Incident)](#flow-2-108-emergency-dispatcher-workflow-single-incident)
@@ -27,26 +47,26 @@
    - [Flow 5: Hospital Bed Control & Emergency Ward Workflow](#flow-5-hospital-bed-control--emergency-ward-workflow)
    - [Flow 6: District Health Official Analytics & Surge Control](#flow-6-district-health-official-analytics--surge-control)
    - [Flow 7: Platform Operations & Administration](#flow-7-platform-operations--administration)
-6. [Multi-Platform Delivery: Web, PWA & Native Mobile](#6-multi-platform-delivery-web-pwa--native-mobile)
+7. [Multi-Platform Delivery: Web, PWA & Native Mobile](#7-multi-platform-delivery-web-pwa--native-mobile)
    - [Responsive Web & Desktop Console](#responsive-web--desktop-console)
    - [Progressive Web App (PWA)](#progressive-web-app-pwa)
    - [Native Android & iOS Apps](#native-android--ios-apps)
    - [Maps & Geospatial Hybrid Architecture](#maps--geospatial-hybrid-architecture)
-7. [Getting Started & Running the Project](#7-getting-started--running-the-project)
+8. [Getting Started & Running the Project](#8-getting-started--running-the-project)
    - [Prerequisites](#prerequisites)
    - [Option A: Standard Local Development (Frontend + Backend)](#option-a-standard-local-development-frontend--backend)
    - [Option B: One-Command All-In-One Preview Server](#option-b-one-command-all-in-one-preview-server)
    - [Option C: Running on Android / iOS (Simulators & Physical Devices)](#option-c-running-on-android--ios-simulators--physical-devices)
    - [Option D: Building the Production Android APK / AAB](#option-d-building-the-production-android-apk--aab)
-8. [Configuration & Environment Variables](#8-configuration--environment-variables)
+9. [Configuration & Environment Variables](#9-configuration--environment-variables)
    - [Backend Variables (`MEDMESH_*`)](#backend-variables-medmesh_)
    - [Frontend Variables (`EXPO_PUBLIC_*` & Build Keys)](#frontend-variables-expo_public_--build-keys)
-9. [Verification, Testing & Quality Assurance](#9-verification-testing--quality-assurance)
-10. [Directory Structure](#10-directory-structure)
+10. [Verification, Testing & Quality Assurance](#10-verification-testing--quality-assurance)
+11. [Directory Structure](#11-directory-structure)
 
 ---
 
-## 1. Executive Summary & Core Philosophy
+## 2. Executive Summary & Core Philosophy
 
 In emergency medical services (EMS), the single biggest cause of preventable transit mortality is **information asymmetry**:
 - Ambulances transport critical patients to hospitals whose ICUs or emergency bays just reached capacity.
@@ -66,7 +86,7 @@ In emergency medical services (EMS), the single biggest cause of preventable tra
 
 ---
 
-## 2. High-Level Architecture
+## 3. High-Level Architecture
 
 MedMesh is organized into clean conceptual tiers matching standard healthcare interoperability patterns:
 
@@ -111,7 +131,7 @@ MedMesh is organized into clean conceptual tiers matching standard healthcare in
 
 ---
 
-## 3. Technology Stack
+## 4. Technology Stack
 
 ### Backend
 - **Language & Runtime:** Python 3.12+
@@ -137,9 +157,9 @@ MedMesh is organized into clean conceptual tiers matching standard healthcare in
 
 ---
 
-## 4. Core Engines & Business Logic
+## 5. Core Engines & Business Logic
 
-### 4.1 Data Quality & Trust Engine
+### 5.1 Data Quality & Trust Engine
 Located in `backend/app/services/trust.py`. Hospital capacity reports are never accepted blindly:
 
 1. **Hard Integrity Filtering:** Counts cannot be negative and cannot exceed a hospital's declared physical capacity. A 500-bed hospital reporting 1,200 available beds is immediately quarantined.
@@ -151,7 +171,7 @@ Located in `backend/app/services/trust.py`. Hospital capacity reports are never 
    - **Verification:** Health department on-site audit (+10).
    - **Integrity Penalties:** Recent quarantined attempts (-15).
 
-### 4.2 Capability-First Matching & Routing Engine
+### 5.2 Capability-First Matching & Routing Engine
 Located in `backend/app/services/matching.py` and `backend/app/services/routing.py`.
 
 ```
@@ -167,7 +187,7 @@ Match Score = 100 × ( 0.34·capability + 0.26·proximity + 0.16·headroom + 0.1
 - **Graceful Catchment Expansion:** If no capable hospital exists within the primary catchment radius, the engine does not fail; it expands outward and marks distant facilities with an explicit warning tag (*“Outside normal catchment · Last resort”*).
 - **Road-Distance Prefiltering:** To keep Distance Matrix API costs sustainable, straight-line distance is computed first. Any hospital whose straight-line distance exceeds the maximum plausible highway travel boundary (`routing_prefilter_km = 260 km`) is skipped before billing a road route calculation.
 
-### 4.3 Bed Reservation & Critical Section Engine
+### 5.3 Bed Reservation & Critical Section Engine
 Located in `backend/app/services/reservations.py`.
 - **Atomic Concurrency Control:** When two ambulances in the same district request the last ICU bed simultaneously, a thread lock and database row lock ensure exactly one hold succeeds. The second caller receives an honest rejection and alternative shortlist recommendations.
 - **Automatic TTL Expiry:** Holds default to a 15-minute window (`MEDMESH_DEFAULT_HOLD_TTL_SECONDS = 900`). If an ambulance cancels or fails to arrive, the hold expires automatically, and the bed returns to the available pool.
@@ -175,7 +195,7 @@ Located in `backend/app/services/reservations.py`.
   $$\text{effective\_beds} = \max(0, \text{available\_beds} - \text{active\_holds})$$
   The public directory, 108 dispatchers, and hospitals all see the true unreserved capacity.
 
-### 4.4 Zero-PHI Structural Triage
+### 5.4 Zero-PHI Structural Triage
 Located in `backend/app/services/triage.py`.
 - **Zero Identification Columns:** The `Incident` model stores:
   - 12 standardized categories: `cardiac`, `stroke`, `road_accident`, `burns`, `respiratory`, `trauma`, `obstetric`, `pediatric`, `snakebite`, `poisoning`, `dialysis`, `other`.
@@ -183,14 +203,14 @@ Located in `backend/app/services/triage.py`.
   - Geographic coordinates: Latitude, Longitude, Taluk, Landmark string.
 - **API Boundary Sanitizer:** If an operator accidentally enters patient identifiers (e.g. names, phone numbers, Aadhaar IDs) in the landmark or free-text fields, the API throws an HTTP 422 validation error instructing the operator to remove personal information.
 
-### 4.5 Mass Casualty Incident (MCI) Protocol
+### 5.5 Mass Casualty Incident (MCI) Protocol
 Located in `backend/app/routers/dispatch.py` and `mobile/app/console/mci/[id].tsx`.
 - **Automatic Multi-Unit Trigger:** If casualty count $> 1$, the dispatch console enters **MCI Mode**.
 - **Load-Balancing Distribution Plan:** The `/incidents/{id}/mci-plan` endpoint calculates a round-robin distribution plan across the top-ranked regional trauma centres to prevent overwhelming any single hospital's emergency room.
 - **Dispatcher Review Console:** The dispatcher can review and manually adjust vehicle and destination assignments using interactive search dropdowns.
 - **Child Incident Generation:** When committed (`/incidents/{id}/mci-commit`), the parent incident is split into distinct, traceable incidents (`TN-...-1`, `TN-...-2`, `TN-...-3`), each assigned to its respective ambulance and hospital while preserving full scene telemetry.
 
-### 4.6 Ambulance State Machine & Escalation Ladder
+### 5.6 Ambulance State Machine & Escalation Ladder
 Located in `backend/app/services/lifecycle.py`.
 Ambulances transition through a strictly enforced state machine:
 ```
@@ -209,7 +229,7 @@ AVAILABLE
   3. **Statewide Fleet:** Any available unit in the state if local fleets are depleted.
 - **Crew Availability Tie-Breakers:** A unit with a crew actively logged on shift is prioritized over an uncrewed vehicle parked at a depot.
 
-### 4.7 Doctor Roster & Specialty Cover Service
+### 5.7 Doctor Roster & Specialty Cover Service
 Located in `backend/app/services/roster.py` and `backend/app/routers/doctors.py`.
 - Tracks on-duty medical specialists (Cardiologists, Neurosurgeons, Orthopedic surgeons, Obstetricians, etc.).
 - Background sweepers verify active duty windows (`duty_end > now()`).
@@ -217,7 +237,7 @@ Located in `backend/app/services/roster.py` and `backend/app/routers/doctors.py`
 
 ---
 
-## 5. User Roles & Complete End-to-End User Flows
+## 6. User Roles & Complete End-to-End User Flows
 
 ### Role Matrix
 
@@ -238,9 +258,13 @@ Located in `backend/app/services/roster.py` and `backend/app/routers/doctors.py`
 Open Directory (/) ──► Filter by District / Specialty ──► Tap Facility (/facility/[id]) ──► Get Directions
 ```
 
+| Desktop View | Mobile View |
+|:---|:---|
+| <img src="docs/shots/directory-desktop.png" width="550" alt="Directory Desktop View" /> | <img src="docs/shots/directory-phone.png" width="220" alt="Directory Mobile View" /> |
+
 1. **Accessing the Portal:** A citizen visits `http://localhost:8081/` or installs the MedMesh PWA. No account or login is required.
 2. **Finding Care:** The home screen presents a clean list and live map of healthcare facilities.
-   - **Language Toggle:** One-tap toggle between **English** and **Tamil (தமிழ்)** with full localized strings.
+   - **Language Toggle:** One-tap toggle between **English** and **Tamil (தமிழ்)** (`docs/shots/36-directory-tamil.png`) with full localized strings.
    - **Voice Search:** Tap the microphone icon in the search bar to dictate hospital names or medical requirements in English or Tamil.
    - **Filter by Care Type:** Filter by *ICU Beds*, *Oxygen Beds*, *Pediatric*, *Trauma*, or *Burns*.
    - **Live Indicators:** Clear color-coded indicators display real-time availability:
@@ -249,6 +273,11 @@ Open Directory (/) ──► Filter by District / Specialty ──► Tap Facili
      - **Red:** Facility at Full Capacity.
      - **Grey:** Stale / Offline (No live data in >4 hours).
 3. **Inspecting Facility Details (`/facility/[id]`):** Tapping a facility opens its detail page:
+
+| Desktop Facility Detail | Mobile Facility Detail |
+|:---|:---|
+| <img src="docs/shots/facility-desktop.png" width="550" alt="Facility Detail Desktop" /> | <img src="docs/shots/facility-phone.png" width="220" alt="Facility Detail Mobile" /> |
+
    - Breakdown of General Beds, ICU Beds, and Ventilators.
    - On-duty specialist doctors currently present.
    - Transparent data freshness and trust score breakdown.
@@ -262,6 +291,10 @@ Open Directory (/) ──► Filter by District / Specialty ──► Tap Facili
 Call Received ──► Intake Form (/console) ──► Ranked Shortlist (/console/[id]) ──► Confirm & Hold ──► Live Trip
 ```
 
+| Desktop Dispatch Console | Mobile Dispatch Console |
+|:---|:---|
+| <img src="docs/shots/console-desktop.png" width="550" alt="Dispatch Console Desktop" /> | <img src="docs/shots/console-phone.png" width="220" alt="Dispatch Console Mobile" /> |
+
 1. **Authentication:** The dispatcher signs in at `/sign-in` (or taps *“108 Dispatcher”* in demo mode).
 2. **Call Intake (`/console`):** When an emergency call is received:
    - Select **Incident Category** (e.g. *Road Traffic Accident*, *Cardiac Arrest*).
@@ -270,6 +303,11 @@ Call Received ──► Intake Form (/console) ──► Ranked Shortlist (/cons
    - Enter **Scene Assessment**: Conscious state, bleeding severity, mechanism of injury, hazards.
    - The system validates that **no patient PII** is entered.
 3. **Shortlist Generation:** Click **Create Incident & Find Hospital**. The dispatcher is routed to the Incident Workspace (`/console/[id]`).
+
+| Incident Shortlist Desktop | Incident Shortlist Mobile |
+|:---|:---|
+| <img src="docs/shots/case-desktop.png" width="550" alt="Incident Shortlist Desktop" /> | <img src="docs/shots/case-phone.png" width="220" alt="Incident Shortlist Mobile" /> |
+
    - The Matching Engine ranks all regional hospitals in real time.
    - For every candidate, the engine displays:
      - Predicted drive time (via road network).
@@ -293,6 +331,10 @@ Call Received ──► Intake Form (/console) ──► Ranked Shortlist (/cons
 Intake: Casualties > 1 ──► Auto-trigger MCI (/console/mci/[id]) ──► Review Plan ──► Confirm & Dispatch All Units
 ```
 
+| Multi-Incident Dispatch Queue | Routing Disclosure & Catchment Inspection |
+|:---|:---|
+| <img src="docs/shots/41-console-queue-statewide.png" width="550" alt="Console Queue Statewide" /> | <img src="docs/shots/42-console-routing-disclosure.png" width="550" alt="Routing Disclosure" /> |
+
 1. **Intake:** In `/console`, the dispatcher enters **Casualties at scene** (e.g., `3` or `12`).
 2. **MCI Activation:** The primary action button dynamically switches to **Create Incident & Plan MCI (X units)**.
 3. **MCI Planning Console (`/console/mci/[id]`):**
@@ -315,8 +357,12 @@ Intake: Casualties > 1 ──► Auto-trigger MCI (/console/mci/[id]) ──► 
 Dispatch Alert ──► En Route ──► At Scene ──► Patient Onboard ──► In Transit ──► Hospital Handover
 ```
 
+| Crew Trip Desktop / Tablet | Crew Trip Mobile Handset |
+|:---|:---|
+| <img src="docs/shots/crew-desktop.png" width="550" alt="Crew Dashboard Desktop" /> | <img src="docs/shots/crew-phone.png" width="220" alt="Crew Dashboard Mobile" /> |
+
 1. **Crew App (`/crew`):** Mounted on the ambulance dashboard tablet or paramedic handset.
-2. **Inbound Call Received:** When dispatched, the screen alerts the crew with incident severity, landmark, and turn-by-turn map coordinates.
+2. **Inbound Call Received:** When dispatched, the screen alerts the crew with incident severity, landmark, and turn-by-turn map coordinates (`docs/shots/39-crew-trip.png`).
 3. **One-Tap Trip Progression:** Paramedics advance the mission stage with a single large tap:
    - **`En Route`** $\rightarrow$ GPS broadcasts position back to 108 control room.
    - **`At Scene`** $\rightarrow$ Timer records arrival time for SLA compliance.
@@ -332,6 +378,10 @@ Dispatch Alert ──► En Route ──► At Scene ──► Patient Onboard �
 ```
 Dashboard (/dashboard) ──► Inbound Alerts ──► One-Tap Quick Keypad ──► Doctor Duty Management
 ```
+
+| Hospital Bed Portal Desktop | Hospital Bed Portal Mobile |
+|:---|:---|
+| <img src="docs/shots/dashboard-desktop.png" width="550" alt="Hospital Dashboard Desktop" /> | <img src="docs/shots/dashboard-phone.png" width="220" alt="Hospital Dashboard Mobile" /> |
 
 1. **Hospital Operations Portal (`/dashboard`):** Designed for emergency department triage nurses and bed managers.
 2. **Inbound Ambulance Prep Alerts:** A dedicated live panel shows inbound units:
@@ -356,6 +406,14 @@ Dashboard (/dashboard) ──► Inbound Alerts ──► One-Tap Quick Keypad �
 District Rollup (/analytics) ──► Capacity Trends ──► Surge Mode Activation ──► CSV Audit Export
 ```
 
+| Statewide Analytics Desktop | Statewide Analytics Mobile |
+|:---|:---|
+| <img src="docs/shots/analytics-desktop.png" width="550" alt="Analytics Overview Desktop" /> | <img src="docs/shots/analytics-phone.png" width="220" alt="Analytics Overview Mobile" /> |
+
+| District Drilldown Desktop | District Drilldown Mobile |
+|:---|:---|
+| <img src="docs/shots/analytics-district-desktop.png" width="550" alt="District Drilldown Desktop" /> | <img src="docs/shots/analytics-district-phone.png" width="220" alt="District Drilldown Mobile" /> |
+
 1. **Executive Dashboard (`/analytics`):** Used by District Medical Officers and Health Secretaries.
 2. **Statewide / District Overview:** Real-time occupancy percentages, total available critical care capacity, and current active 108 incident counts.
 3. **Surge Mode Activation:**
@@ -373,6 +431,10 @@ District Rollup (/analytics) ──► Capacity Trends ──► Surge Mode Acti
 Admin Portal (/admin) ──► User Management ──► Fleet Management ──► Append-Only Audit Trail
 ```
 
+| Platform Administration Desktop | Platform Administration Mobile |
+|:---|:---|
+| <img src="docs/shots/admin-desktop.png" width="550" alt="Platform Administration Desktop" /> | <img src="docs/shots/admin-phone.png" width="220" alt="Platform Administration Mobile" /> |
+
 1. **Administration Console (`/admin`):** Restricted to platform administrators.
 2. **Fleet Management (`/admin/FleetPanel.tsx`):**
    - Register new ambulances with registration numbers, base stations, and capabilities (ALS, BLS, Neonatal, Patient Transport).
@@ -382,7 +444,7 @@ Admin Portal (/admin) ──► User Management ──► Fleet Management ─�
 
 ---
 
-## 6. Multi-Platform Delivery: Web, PWA & Native Mobile
+## 7. Multi-Platform Delivery: Web, PWA & Native Mobile
 
 MedMesh delivers an identical, rock-solid user experience across all form factors through a single codebase:
 
@@ -427,7 +489,7 @@ Located in `mobile/src/components/MapSurface.tsx`:
 
 ---
 
-## 7. Getting Started & Running the Project
+## 8. Getting Started & Running the Project
 
 ### Prerequisites
 - **Python 3.12+** and `pip`
@@ -560,7 +622,7 @@ The output APK will be generated at:
 
 ---
 
-## 8. Configuration & Environment Variables
+## 9. Configuration & Environment Variables
 
 ### Backend Variables (`MEDMESH_*`)
 Configured in `backend/.env` (defaults defined in `backend/app/config.py`):
@@ -594,7 +656,7 @@ Configured in `mobile/.env` (inlined into the JavaScript bundle at build time):
 
 ---
 
-## 9. Verification, Testing & Quality Assurance
+## 10. Verification, Testing & Quality Assurance
 
 MedMesh maintains rigorous automated test suites covering backend API contracts, frontend TypeScript types, and headless browser workflows:
 
@@ -619,7 +681,7 @@ node probe-multiuser.mjs       # Validates concurrent sessions (dispatcher racin
 
 ---
 
-## 10. Directory Structure
+## 11. Directory Structure
 
 ```
 medmesh/
